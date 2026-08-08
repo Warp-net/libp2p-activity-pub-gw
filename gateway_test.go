@@ -1395,33 +1395,39 @@ func TestGetRepliesDereferencesURIItems(t *testing.T) {
 	}
 }
 
-// GetReplies must prefer the Mastodon REST context endpoint, returning the whole
-// thread from one call and mapping REST statuses (not AP Notes) into replies.
+// GetReplies must prefer the Mastodon REST context endpoint and serve one
+// thread level per call: the context lists the whole subtree flattened, but
+// only direct children are the note's replies — a nested reply is served when
+// the client asks for its own parent's replies.
 func TestGetRepliesUsesMastodonContext(t *testing.T) {
 	g := testGateway(t)
+	descendants := []any{}
 	var srv *httptest.Server
 	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/statuses/100/context" {
+		switch r.URL.Path {
+		case "/api/v1/statuses/100/context", "/api/v1/statuses/101/context":
+			// Mastodon returns the same flattened subtree for every status of
+			// this thread that has descendants below it.
 			writeJSON(w, "application/json", map[string]any{
-				"ancestors": []any{},
-				"descendants": []any{
-					map[string]any{
-						"id": "101", "uri": srv.URL + "/users/bob/statuses/101",
-						"content": "<p>first reply</p>", "created_at": "2024-01-01T00:00:00.000Z",
-						"in_reply_to_id": "100", "account": map[string]any{"acct": "bob"},
-					},
-					map[string]any{
-						"id": "102", "uri": srv.URL + "/users/carol/statuses/102",
-						"content": "<p>nested</p>", "created_at": "2024-01-01T00:01:00.000Z",
-						"in_reply_to_id": "101", "account": map[string]any{"acct": "carol@other.example"},
-					},
-				},
+				"ancestors": []any{}, "descendants": descendants,
 			})
 			return
 		}
 		http.NotFound(w, r) // no AP /replies route: only the context path must be used
 	}))
 	defer srv.Close()
+	descendants = []any{
+		map[string]any{
+			"id": "101", "uri": srv.URL + "/users/bob/statuses/101",
+			"content": "<p>first reply</p>", "created_at": "2024-01-01T00:00:00.000Z",
+			"in_reply_to_id": "100", "account": map[string]any{"acct": "bob"},
+		},
+		map[string]any{
+			"id": "102", "uri": srv.URL + "/users/carol/statuses/102",
+			"content": "<p>nested</p>", "created_at": "2024-01-01T00:01:00.000Z",
+			"in_reply_to_id": "101", "account": map[string]any{"acct": "carol@other.example"},
+		},
+	}
 	g.client = srv.Client()
 	host := strings.TrimPrefix(srv.URL, "https://")
 
@@ -1431,8 +1437,8 @@ func TestGetRepliesUsesMastodonContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if len(resp.Tweets) != 2 {
-		t.Fatalf("replies = %d, want 2: %+v", len(resp.Tweets), resp.Tweets)
+	if len(resp.Tweets) != 1 {
+		t.Fatalf("replies = %d, want the direct child only: %+v", len(resp.Tweets), resp.Tweets)
 	}
 	r0 := resp.Tweets[0]
 	if r0.Id != srv.URL+"/users/bob/statuses/101" {
@@ -1447,12 +1453,75 @@ func TestGetRepliesUsesMastodonContext(t *testing.T) {
 	if r0.ParentId == nil || *r0.ParentId != root { // in_reply_to 100 -> root URL
 		t.Errorf("r0.ParentId = %v, want %q", r0.ParentId, root)
 	}
-	r1 := resp.Tweets[1]
+
+	// Walking one level deeper (bob's reply as the parent) surfaces the
+	// nested reply, parented at bob's uri.
+	nested, err := b.GetReplies(context.Background(), r0.Id)
+	if err != nil {
+		t.Fatalf("nested: %v", err)
+	}
+	if len(nested.Tweets) != 1 {
+		t.Fatalf("nested replies = %d, want 1: %+v", len(nested.Tweets), nested.Tweets)
+	}
+	r1 := nested.Tweets[0]
 	if r1.UserId != "carol@other.example" { // already a full handle: keep as-is
 		t.Errorf("r1.UserId = %q, want carol@other.example", r1.UserId)
 	}
-	if r1.ParentId == nil || *r1.ParentId != srv.URL+"/users/bob/statuses/101" {
-		t.Errorf("r1.ParentId = %v, want bob's uri", r1.ParentId) // in_reply_to 101 -> bob
+	if r1.ParentId == nil || *r1.ParentId != r0.Id {
+		t.Errorf("r1.ParentId = %v, want bob's uri", r1.ParentId)
+	}
+}
+
+// A federated Warpnet reply comes back from the context as a status hosted by
+// the gateway itself; GetReplies must hand it to the node in native shape —
+// bare tweet/user ids, no foreign network tag — so the node dedupes it against
+// its own thread index.
+func TestGetRepliesNativizesOwnStatuses(t *testing.T) {
+	g := testGateway(t)
+	self := g.baseURL()
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/statuses/100/context" {
+			writeJSON(w, "application/json", map[string]any{
+				"ancestors": []any{},
+				"descendants": []any{map[string]any{
+					"id":  "201",
+					"uri": self + "/users/01KTRAUSER/statuses/01KZH0TWEET?parent=x",
+					"content": "<p>from warpnet</p>", "created_at": "2024-01-01T00:00:00.000Z",
+					"in_reply_to_id": "100",
+					"account": map[string]any{
+						"acct": "01KTRAUSER@selfhost", "display_name": "Vadim",
+					},
+				}},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	g.client = srv.Client()
+
+	b := newMastodonBridge(g, "node1")
+	root := srv.URL + "/users/alice/statuses/100"
+	resp, err := b.GetReplies(context.Background(), root)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(resp.Tweets) != 1 {
+		t.Fatalf("replies = %d, want 1: %+v", len(resp.Tweets), resp.Tweets)
+	}
+	r0 := resp.Tweets[0]
+	if r0.Id != "01KZH0TWEET" {
+		t.Errorf("Id = %q, want the bare warpnet tweet id", r0.Id)
+	}
+	if r0.UserId != "01KTRAUSER" {
+		t.Errorf("UserId = %q, want the bare warpnet user id", r0.UserId)
+	}
+	if r0.Username != "Vadim" {
+		t.Errorf("Username = %q, want the display name", r0.Username)
+	}
+	if r0.Network != "" {
+		t.Errorf("Network = %q, want native (empty)", r0.Network)
 	}
 }
 

@@ -279,6 +279,13 @@ func (b *mastodonBridge) restTweetsPage(ctx context.Context, handle, pageURL str
 		if sid := asString(s["id"]); sid != "" {
 			lastID = sid
 		}
+		// exclude_replies leaves self-replies (thread continuations) in the
+		// page; a Warpnet profile carries only top-level posts, so a reply
+		// must never surface as a standalone tweet — it stays reachable
+		// through its parent's thread.
+		if asString(s["in_reply_to_id"]) != "" {
+			continue
+		}
 		if t, ok := restStatusToTweet(host, s); ok {
 			resp.Tweets = append(resp.Tweets, t)
 		}
@@ -325,8 +332,20 @@ func (b *mastodonBridge) apTweets(ctx context.Context, handle string, cursor *st
 		return tweetsResponse{}, err
 	}
 	resp := tweetsResponse{UserId: handle, Cursor: asString(page["next"])}
-	resp.Tweets = b.resolveTimelineItems(ctx, handle, asSlice(page["orderedItems"]))
+	resp.Tweets = topLevelOnly(b.resolveTimelineItems(ctx, handle, asSlice(page["orderedItems"])))
 	return resp, nil
+}
+
+// topLevelOnly drops replies from a profile timeline: the AP outbox lists them
+// alongside posts, but a Warpnet profile carries only top-level tweets.
+func topLevelOnly(ts []tweet) []tweet {
+	out := ts[:0]
+	for _, t := range ts {
+		if t.ParentId == nil || *t.ParentId == "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // resolveTimelineItems renders one outbox page's items into tweets concurrently,
@@ -460,7 +479,11 @@ func (b *mastodonBridge) GetReplies(ctx context.Context, noteURL string) (tweets
 	if resp, ok := b.contextReplies(ctx, noteURL); ok {
 		return resp, nil
 	}
-	return b.apReplies(ctx, noteURL)
+	resp, err := b.apReplies(ctx, noteURL)
+	for i := range resp.Tweets {
+		b.nativizeOwnStatus(&resp.Tweets[i], nil)
+	}
+	return resp, err
 }
 
 // maxReplies bounds how many replies GetReplies returns from either path.
@@ -484,27 +507,71 @@ func (b *mastodonBridge) contextReplies(ctx context.Context, noteURL string) (tw
 		return tweetsResponse{}, false // not a context document
 	}
 	items := asSlice(desc)
-	// Map each status's REST id to its ActivityPub uri so a reply's parent can be
-	// expressed as an AP note URL (the id the rest of the gateway speaks), with
-	// the requested note as the thread root.
 	idToURI := map[string]string{id: noteURL}
-	for _, it := range items {
-		if s := asMap(it); s != nil {
-			if sid, uri := asString(s["id"]), asString(s["uri"]); sid != "" && uri != "" {
-				idToURI[sid] = uri
-			}
-		}
-	}
 	resp := tweetsResponse{Tweets: []tweet{}}
 	for _, it := range items {
 		if len(resp.Tweets) >= maxReplies {
 			break
 		}
-		if t, ok := restReplyToTweet(host, asMap(it), noteURL, idToURI); ok {
+		s := asMap(it)
+		// The context lists the note's whole subtree flattened; only direct
+		// children are this note's replies — deeper levels are served when
+		// the client walks the thread one parent at a time.
+		if s == nil || asString(s["in_reply_to_id"]) != id {
+			continue
+		}
+		if t, ok := restReplyToTweet(host, s, noteURL, idToURI); ok {
+			b.nativizeOwnStatus(&t, asMap(s["account"]))
 			resp.Tweets = append(resp.Tweets, t)
 		}
 	}
 	return resp, true
+}
+
+// nativizeOwnStatus rewrites a status hosted by this gateway — a federated
+// Warpnet reply — back into its native Warpnet shape: bare tweet/user ids and
+// no foreign network tag, so the asking node lines it up with (and dedupes
+// against) the copy in its own thread index. account is the REST account of
+// the status for a display name; nil is fine.
+func (b *mastodonBridge) nativizeOwnStatus(t *tweet, account map[string]any) {
+	if t.ParentId != nil {
+		if _, pid, ok := b.ownStatusRef(*t.ParentId); ok {
+			t.ParentId = &pid
+		}
+	}
+	owner, id, ok := b.ownStatusRef(t.Id)
+	if !ok {
+		return
+	}
+	t.Id = id
+	t.UserId = owner
+	t.Network = ""
+	t.Username = owner
+	if name := asString(account["display_name"]); name != "" {
+		t.Username = name
+	}
+}
+
+// ownStatusRef splits a status URL hosted by this gateway
+// (https://<self>/users/{user}/statuses/{id}[?parent=...]) into its Warpnet
+// owner and tweet ids; ok is false for foreign URLs.
+func (b *mastodonBridge) ownStatusRef(rawURL string) (owner, tweetID string, ok bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || !b.ap.isSelfHost(u.Hostname()) {
+		return "", "", false
+	}
+	rest, found := strings.CutPrefix(u.Path, pathUsers)
+	if !found {
+		return "", "", false
+	}
+	owner, tweetID, found = strings.Cut(rest, pathStatuses)
+	if !found || owner == "" || tweetID == "" {
+		return "", "", false
+	}
+	if i := strings.IndexByte(tweetID, '/'); i >= 0 {
+		tweetID = tweetID[:i]
+	}
+	return owner, tweetID, true
 }
 
 // restStatusRef splits an AP note/status URL into the instance host and the
