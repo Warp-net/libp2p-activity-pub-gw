@@ -3,15 +3,23 @@ services:
     container_name: fediverse-gateway-mainnet
     image: ghcr.io/warp-net/warpnet-gateway:latest
     restart: always
-    # No network_mode host (unlike testnet): both gateways share the droplet and
-    # the testnet one already holds the libp2p :4040. Its own namespace is enough
-    # — inbound arrives via the network's relays and Tailscale Funnel — so only
-    # /logs is published: http://<host>:4081/logs (:4080 is the testnet's).
+    # No network_mode host (unlike testnet): this container holds a libp2p node
+    # per network (:4040 mainnet, :4041 testnet) and the testnet-only deployment
+    # already binds :4040 on the droplet. Its own namespace keeps them apart —
+    # inbound arrives via the networks' relays and Tailscale Funnel, so nothing
+    # else needs publishing: http://<host>:4081/logs (:4080 is the testnet's).
     ports:
       - "4081:4080"
     environment:
-      # Join the Warpnet MAINNET — bootstrap peers are baked into the gateway.
-      - NODE_NETWORK=warpnet
+      # Join MAINNET and TESTNET at once — one libp2p node each, in this one
+      # process, behind the single ActivityPub host. Bootstrap peers for both are
+      # baked into the gateway; a user is resolved on whichever network has them.
+      - NODE_NETWORK=warpnet,testnet
+      # Per-node off switches: set either to true to take that node out without
+      # touching NODE_NETWORK (e.g. GATEWAY_DISABLE_TESTNET=true docker compose
+      # ... up -d). Empty leaves the node running.
+      - GATEWAY_DISABLE_WARPNET=${GATEWAY_DISABLE_WARPNET:-}
+      - GATEWAY_DISABLE_TESTNET=${GATEWAY_DISABLE_TESTNET:-}
       - GATEWAY_LOGS_TOKEN=${GATEWAY_LOGS_TOKEN:-}
       # Standalone plain-HTTP /logs listener, published as :4081 above and still
       # gated by the token. Leave empty to disable.

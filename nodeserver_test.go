@@ -47,10 +47,11 @@ func newTestNode(t *testing.T, seed string) *nodeClient {
 	t.Cleanup(func() { _ = h.Close() })
 
 	c := &nodeClient{
-		h:      h,
-		priv:   priv,
-		relays: map[peer.ID]struct{}{},
-		owner:  expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		h:       h,
+		priv:    priv,
+		network: defaultWarpnetNetwork,
+		relays:  map[peer.ID]struct{}{},
+		owner:   expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c

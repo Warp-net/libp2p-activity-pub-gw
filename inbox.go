@@ -120,7 +120,7 @@ func (g *gateway) handleInbox(w http.ResponseWriter, r *http.Request, user strin
 // handleInboundActivity translates a non-Follow inbound activity into a Warpnet
 // route and forwards it to the owner's node, bounded by the delivery semaphore.
 func (g *gateway) handleInboundActivity(w http.ResponseWriter, typ string, raw map[string]any) {
-	route, payload, ok := g.translateInbound(raw)
+	route, payload, localUser, ok := g.translateInbound(raw)
 	if !ok {
 		log.Infof("inbox: %q acknowledged, not handled", typ)
 		w.WriteHeader(http.StatusAccepted)
@@ -135,7 +135,7 @@ func (g *gateway) handleInboundActivity(w http.ResponseWriter, typ string, raw m
 	case g.sem <- struct{}{}:
 		go func() {
 			defer func() { <-g.sem }()
-			if _, err := g.req.request(route, payload); err != nil {
+			if _, err := g.requestForUser(localUser, route, payload); err != nil {
 				log.Errorf("inbox: forward %s -> %s: %v", typ, route, err)
 			}
 		}()

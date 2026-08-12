@@ -57,9 +57,23 @@ copy the `tskey-auth-...` value — it becomes `TS_AUTHKEY`.
 The gateway joins Warpnet by itself and serves **any** user, so none of these
 are required:
 
-| Variable       | When to set it                 | Default   |
-| -------------- | ------------------------------ | --------- |
-| `NODE_NETWORK` | only for a non-default network | `warpnet` |
+| Variable                    | When to set it                            | Default   |
+| --------------------------- | ----------------------------------------- | --------- |
+| `NODE_NETWORK`              | a non-default network, or several at once | `warpnet` |
+| `GATEWAY_DISABLE_<NETWORK>` | to switch one node off                    | on        |
+
+`NODE_NETWORK` takes one network or a comma-separated list
+(`warpnet,testnet`). Each name gets its own libp2p node in the one process, all
+behind the single ActivityPub host: a handle carries no network, so a requested
+user is resolved on whichever network has them, and everything that user does
+afterwards stays on that network.
+
+Each node has an off switch named after its network —
+`GATEWAY_DISABLE_WARPNET`, `GATEWAY_DISABLE_TESTNET` — so one can be taken out
+without rewriting the list. Only a real boolean (`true`, `1`) disables a node;
+an unset or unparseable value leaves it running, so a typo can't silently drop a
+network. If every network ends up disabled or unreachable, the gateway serves
+the static profile only.
 
 ---
 

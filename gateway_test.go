@@ -755,7 +755,7 @@ func TestTranslateInbound(t *testing.T) {
 	actor := "https://m/users/bob"
 	status := "https://gw.example/users/alice/statuses/t1"
 
-	route, payload, ok := g.translateInbound(map[string]any{"type": "Like", "actor": actor, "object": status})
+	route, payload, _, ok := g.translateInbound(map[string]any{"type": "Like", "actor": actor, "object": status})
 	if !ok || route != routePostReact {
 		t.Fatalf("favourite: route=%q ok=%v", route, ok)
 	}
@@ -780,7 +780,7 @@ func TestTranslateInbound(t *testing.T) {
 		t.Fatalf("reactor id = %q, want the bob@m handle", react.OwnerId)
 	}
 
-	route, payload, ok = g.translateInbound(map[string]any{
+	route, payload, _, ok = g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{
 			"type": "Note", "id": "https://m/users/bob/statuses/9",
@@ -811,7 +811,7 @@ func TestTranslateInbound(t *testing.T) {
 	}
 
 	// Quote-post convention: no inReplyTo, text opens with "RE: <status URL>".
-	route, payload, ok = g.translateInbound(map[string]any{
+	route, payload, _, ok = g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{"type": "Note", "content": "<p>RE: <a href=\"" + status + "\">" + status + "</a> nice post</p>"},
 	})
@@ -824,7 +824,7 @@ func TestTranslateInbound(t *testing.T) {
 	}
 
 	// RE: pointing at a foreign status is not ours to thread.
-	if _, _, ok := g.translateInbound(map[string]any{
+	if _, _, _, ok := g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{"type": "Note", "content": "<p>RE: https://evil/users/x/statuses/9 hi</p>"},
 	}); ok {
@@ -833,7 +833,7 @@ func TestTranslateInbound(t *testing.T) {
 
 	// Quote of a local status (Misskey wire: quoteUri + "RE:" text fallback)
 	// maps to a quote retweet.
-	route, payload, ok = g.translateInbound(map[string]any{
+	route, payload, _, ok = g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{
 			"type": "Note", "quoteUri": status,
@@ -856,7 +856,7 @@ func TestTranslateInbound(t *testing.T) {
 
 	// Quote property with a leading "RE:" fallback (Mastodon wire form)
 	// drops the fallback from the comment too.
-	route, payload, ok = g.translateInbound(map[string]any{
+	route, payload, _, ok = g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{
 			"type": "Note", "quote": status,
@@ -871,7 +871,7 @@ func TestTranslateInbound(t *testing.T) {
 	}
 
 	// Same via the text fallback alone (no quoteUri).
-	route, payload, ok = g.translateInbound(map[string]any{
+	route, payload, _, ok = g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{"type": "Note", "content": "<p>nice<br>RE: " + status + "</p>"},
 	})
@@ -883,7 +883,7 @@ func TestTranslateInbound(t *testing.T) {
 	}
 
 	// A quote of a foreign status is not ours to store.
-	if _, _, ok := g.translateInbound(map[string]any{
+	if _, _, _, ok := g.translateInbound(map[string]any{
 		"type": "Create", "actor": actor,
 		"object": map[string]any{
 			"type": "Note", "quoteUri": "https://evil/users/x/statuses/9",
@@ -893,21 +893,21 @@ func TestTranslateInbound(t *testing.T) {
 		t.Fatal("foreign quote should be unhandled")
 	}
 
-	if route, _, ok := g.translateInbound(map[string]any{
+	if route, _, _, ok := g.translateInbound(map[string]any{
 		"type": "Undo", "actor": actor,
 		"object": map[string]any{"type": "Follow", "object": "https://gw.example/users/alice"},
 	}); !ok || route != routePostUnfollow {
 		t.Fatalf("undo follow: route=%q ok=%v", route, ok)
 	}
 
-	if route, _, ok := g.translateInbound(map[string]any{
+	if route, _, _, ok := g.translateInbound(map[string]any{
 		"type": "Undo", "actor": actor,
 		"object": map[string]any{"type": "Like", "object": status},
 	}); !ok || route != routePostUnreact {
 		t.Fatalf("undo favourite: route=%q ok=%v", route, ok)
 	}
 
-	if route, payload, ok := g.translateInbound(map[string]any{
+	if route, payload, _, ok := g.translateInbound(map[string]any{
 		"type": "Undo", "actor": actor,
 		"object": map[string]any{"type": "Announce", "object": status},
 	}); !ok || route != routePostUnretweet {
@@ -916,7 +916,7 @@ func TestTranslateInbound(t *testing.T) {
 		t.Fatalf("unretweet event: %+v", ur)
 	}
 
-	route, payload, ok = g.translateInbound(map[string]any{"type": "Announce", "actor": actor, "object": status})
+	route, payload, _, ok = g.translateInbound(map[string]any{"type": "Announce", "actor": actor, "object": status})
 	if !ok || route != routePostRetweet {
 		t.Fatalf("announce: route=%q ok=%v", route, ok)
 	}
@@ -929,10 +929,10 @@ func TestTranslateInbound(t *testing.T) {
 	}
 
 	// Foreign-host objects and unhandled types are rejected.
-	if _, _, ok := g.translateInbound(map[string]any{"type": "Like", "actor": actor, "object": "https://evil/users/x/statuses/9"}); ok {
+	if _, _, _, ok := g.translateInbound(map[string]any{"type": "Like", "actor": actor, "object": "https://evil/users/x/statuses/9"}); ok {
 		t.Fatal("foreign-host like should be unhandled")
 	}
-	if _, _, ok := g.translateInbound(map[string]any{"type": "Delete", "actor": actor, "object": status}); ok {
+	if _, _, _, ok := g.translateInbound(map[string]any{"type": "Delete", "actor": actor, "object": status}); ok {
 		t.Fatal("delete should not translate to a node route")
 	}
 }

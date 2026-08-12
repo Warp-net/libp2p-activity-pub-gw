@@ -25,9 +25,13 @@ header). It is a plain `text/plain` dump of the last ~2000 lines. Two listeners 
   the prefix is in `deploy/docker-compose-<network>.yml`, the public host is also visible on
   Mastodon as the `@user@<host>` domain).
 
-Both networks run on the same droplet, so pick the port/host of the one you are debugging.
-The droplet ip lives in `.github/workflows/build-deploy-<network>.yaml` and the funnel prefix
-in `deploy/docker-compose-<network>.yml`. **Never commit the token value** — pass it at call
+Two deployments share the droplet, so pick the port/host of the one you are debugging: the
+testnet-only one (`:4080`, `warpnet-gw-testnet`) and the mainnet one (`:4081`, `warpnet-gw`),
+which joins mainnet **and** testnet in a single process — one libp2p node each. Its logs
+therefore carry both networks; `multinet:` lines say which network serves a given user, and
+`nodeclient <peer>: joined Warpnet (<network>)` appears once per node at startup. The droplet
+ip lives in `.github/workflows/build-deploy-<network>.yaml` and the funnel prefix in
+`deploy/docker-compose-<network>.yml`. **Never commit the token value** — pass it at call
 time.
 
 ### Reaching it from a restricted sandbox
