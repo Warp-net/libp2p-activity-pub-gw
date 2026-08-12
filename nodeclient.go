@@ -55,6 +55,7 @@ import (
 var (
 	errNoEntryPeers     = errors.New("no Warpnet entry peers (check NODE_NETWORK)")
 	errNoEntryReachable = errors.New("nodeclient: no Warpnet entry peer reachable")
+	errNoListenAddr     = errors.New("no libp2p listen address (add one to p2pListenByNetwork)")
 )
 
 // owner cache bounds: ownership can move between nodes, so entries expire and
@@ -84,10 +85,11 @@ const (
 // nodeClient joins the Warpnet DHT through the network's relays and streams the
 // /public/... routes to the member nodes it discovers via the DHT.
 type nodeClient struct {
-	h      host.Host
-	priv   ed25519.PrivateKey
-	dht    *dht.IpfsDHT
-	relays map[peer.ID]struct{} // entry peers (relays): discovery/connectivity only, not data routes
+	h       host.Host
+	priv    ed25519.PrivateKey
+	dht     *dht.IpfsDHT
+	network string               // the Warpnet network this node joined
+	relays  map[peer.ID]struct{} // entry peers (relays): discovery/connectivity only, not data routes
 
 	mu    sync.Mutex
 	good  []peer.ID                       // member nodes known to answer data routes; tried first
@@ -115,13 +117,18 @@ func networkEntries(network string) ([]peer.AddrInfo, error) {
 	return entries, nil
 }
 
-// connectNetwork builds a libp2p host wired for Warpnet and joins through the
-// configured network's entry peers.
-func connectNetwork(ctx context.Context) (*nodeClient, error) {
-	network := envOr("NODE_NETWORK", defaultWarpnetNetwork)
+// connectNetwork builds a libp2p host wired for Warpnet and joins the named
+// network through its entry peers. One process calls it once per network in
+// NODE_NETWORK (see connectNetworks), so everything it builds — host, DHT,
+// listen port — is per network.
+func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	entries, err := networkEntries(network)
 	if err != nil {
 		return nil, err
+	}
+	listen, ok := p2pListenByNetwork[network]
+	if !ok {
+		return nil, fmt.Errorf("nodeclient: %s: %w", network, errNoListenAddr)
 	}
 
 	// Deterministic identity: a fixed seed yields a stable peer id across
@@ -160,7 +167,7 @@ func connectNetwork(ctx context.Context) (*nodeClient, error) {
 		libp2p.ResourceManager(rm),
 		libp2p.Identity(p2pPriv),
 		libp2p.PrivateNetwork(pnet.PSK(psk)),
-		libp2p.ListenAddrStrings(defaultP2PListen),
+		libp2p.ListenAddrStrings(listen),
 		libp2p.WithDialTimeout(60 * time.Second),
 		libp2p.Transport(camouflage.NewCamouflageTransport),
 		libp2p.Ping(true),
@@ -219,7 +226,7 @@ func connectNetwork(ctx context.Context) (*nodeClient, error) {
 	log.Infof("nodeclient %v: joined Warpnet (%s) via %d relay(s); discovering members via DHT", h.ID(), network, connected)
 
 	c := &nodeClient{
-		h: h, priv: priv, dht: kdht, relays: relays,
+		h: h, priv: priv, dht: kdht, network: network, relays: relays,
 		owner: expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
 	}
 	c.stream = c.streamToMember
@@ -385,9 +392,17 @@ type nodeSource struct {
 }
 
 func (s nodeSource) GetUser(preferredUsername string) (warpnetUser, bool) {
-	bt, err := s.client.request(routeGetUser, getUserEvent{UserId: preferredUsername})
+	return s.client.lookupUser(preferredUsername)
+}
+
+// lookupUser reads a profile from this one network. A miss is logged at debug,
+// not error: the gateway asks every joined network for a handle (which carries
+// no network of its own), so a miss on the others is the normal case — the
+// caller reports it once when no network has the user.
+func (c *nodeClient) lookupUser(preferredUsername string) (warpnetUser, bool) {
+	bt, err := c.request(routeGetUser, getUserEvent{UserId: preferredUsername})
 	if err != nil {
-		log.Errorf("nodesource: get user %s: %v", preferredUsername, err)
+		log.Debugf("nodesource: %s: get user %s: %v", c.network, preferredUsername, err)
 		return warpnetUser{}, false
 	}
 	var u user

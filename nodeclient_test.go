@@ -41,12 +41,28 @@ func TestNetworkEntries(t *testing.T) {
 	})
 }
 
-// connectNetwork must fail fast (rather than build a host) when NODE_NETWORK
-// names a network with no bootstrap relays.
+// connectNetwork must fail fast (rather than build a host) when asked for a
+// network with no bootstrap relays.
 func TestConnectNetworkRejectsAnUnknownNetwork(t *testing.T) {
-	t.Setenv("NODE_NETWORK", "definitely-not-a-warpnet")
-	if _, err := connectNetwork(context.Background()); !errors.Is(err, errNoEntryPeers) {
+	if _, err := connectNetwork(context.Background(), "definitely-not-a-warpnet"); !errors.Is(err, errNoEntryPeers) {
 		t.Fatalf("err = %v, want errNoEntryPeers", err)
+	}
+}
+
+// Every network the gateway can bootstrap into needs its own libp2p port: they
+// are all joined in one process, so a shared address would leave the second node
+// unable to listen and the gateway silently serving one network.
+func TestP2PListenAddrsAreDistinct(t *testing.T) {
+	seen := make(map[string]string, len(bootstrapByNetwork))
+	for network := range bootstrapByNetwork {
+		addr, ok := p2pListenByNetwork[network]
+		if !ok {
+			t.Fatalf("network %q has bootstrap peers but no listen address", network)
+		}
+		if other, dup := seen[addr]; dup {
+			t.Fatalf("networks %q and %q share listen address %s", network, other, addr)
+		}
+		seen[addr] = network
 	}
 }
 

@@ -27,10 +27,12 @@ resulting from the use or misuse of this software.
 
 // Command fediverse-gateway is a thin ActivityPub gateway that lets Warpnet
 // users be discovered and followed from Mastodon / the Fediverse. It is agnostic
-// to node, user, and network: it joins Warpnet through the network's bootstrap
-// nodes and resolves any requested user via the public routes. Outbound
-// post/follow federation follows the graph — it starts for a user once they
-// gain a Fediverse follower, and is never pinned to a configured user.
+// to node, user, and network: it joins every network named in NODE_NETWORK
+// (one libp2p node each, e.g. "warpnet,testnet") through their bootstrap nodes
+// and resolves any requested user via the public routes, on whichever network
+// has them. Outbound post/follow federation follows the graph — it starts for a
+// user once they gain a Fediverse follower, and is never pinned to a configured
+// user.
 //
 // Implemented: WebFinger, an actor document with an RSA public key, an inbox
 // that verifies HTTP signatures and answers Follow with a signed Accept
@@ -39,9 +41,11 @@ resulting from the use or misuse of this software.
 //
 // Configuration is environment-only and intentionally minimal: GATEWAY_KEY,
 // GATEWAY_FUNNEL_DIR, GATEWAY_FUNNEL_HOSTNAME, TS_AUTHKEY, and the standard
-// NODE_NETWORK. It does NOT use CLI flags: importing the libp2p stack pulls in
-// config.init's pflag.Parse, which would clash with a second flag set, and
-// every other Warpnet node is env-configured too.
+// NODE_NETWORK (one name or a comma-separated list, each network's node also
+// switchable on its own via GATEWAY_DISABLE_<NETWORK>). It does NOT use CLI
+// flags: importing the libp2p stack pulls in config.init's pflag.Parse, which
+// would clash with a second flag set, and every other Warpnet node is
+// env-configured too.
 //
 // The gateway keeps only keys on disk (RSA signing key); profile/followers
 // live in Warpnet. The public endpoint is self-hosted via embedded Tailscale
@@ -64,7 +68,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.86"
+const gatewayVersion = "0.1.89"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -118,14 +122,18 @@ func main() {
 	// driven by the follower graph (onFollowed), never pinned to a user.
 	appCtx, appCancel := context.WithCancel(context.Background())
 
-	var src warpnetSource = staticSource{} // empty fallback when the network is unreachable
-	var nodeCli *nodeClient
-	if cli, cerr := connectNetwork(appCtx); cerr != nil {
-		log.Warnf("gateway: %v; serving the static profile only", cerr)
+	// Join every network in NODE_NETWORK at once — one libp2p node each — and
+	// serve them behind the single ActivityPub host. A handle carries no network,
+	// so multiNode locates each user on the network that has them.
+	var src warpnetSource = staticSource{} // empty fallback when no network is reachable
+	var nodes *multiNode
+	clients := connectNetworks(appCtx)
+	if len(clients) == 0 {
+		log.Warnln("gateway: no Warpnet network reachable; serving the static profile only")
 	} else {
-		nodeCli = cli
-		src = nodeSource{client: nodeCli}
-		log.Infoln("gateway: joined Warpnet; any user is resolvable via the network")
+		nodes = newMultiNode(clients)
+		src = nodes
+		log.Infof("gateway: joined Warpnet (%s); any user is resolvable via the network", nodes.networks())
 	}
 
 	// The follower graph lives in Warpnet, read/written through the owner member
@@ -133,8 +141,8 @@ func main() {
 	// configured does the gateway fall back to an in-memory dev store.
 	var followers followerStore
 	var req nodeRequester
-	if nodeCli != nil {
-		req = nodeCli
+	if nodes != nil {
+		req = nodes
 	} else {
 		followers = newMemFollowerStore()
 	}
@@ -156,18 +164,21 @@ func main() {
 		logs:      logs,
 		logsToken: os.Getenv("GATEWAY_LOGS_TOKEN"),
 	}
-	if nodeCli != nil {
+	if nodes != nil {
 		// The store resolves stored follower handles back to actor urls through the
-		// gateway, so it is wired once g exists.
-		g.followers = nodeFollowerStore{req: nodeCli, resolver: g}
+		// gateway, so it is wired once g exists. Its routes are user-scoped, so
+		// multiNode sends each to the network that user lives on.
+		g.followers = nodeFollowerStore{req: nodes, resolver: g}
 	}
 
-	// Serve Warpnet's public /public routes over libp2p (Mastodon -> Warpnet):
-	// the gateway joins as an ordinary member peer that advertises a Mastodon
-	// account as its node owner (so discovery seeds it) and resolves every
-	// user/tweet/image request live from the Fediverse via ActivityPub.
-	if nodeCli != nil {
-		nodeCli.serveRoutes(g, defaultOwnerHandle)
+	// Serve Warpnet's public /public routes over libp2p (Mastodon -> Warpnet) on
+	// every joined network: the gateway joins each as an ordinary member peer that
+	// advertises a Mastodon account as its node owner (so discovery seeds it) and
+	// resolves every user/tweet/image request live from the Fediverse via
+	// ActivityPub. The Fediverse side is network-independent, so all nodes serve
+	// the same handlers.
+	for _, c := range clients {
+		c.serveRoutes(g, defaultOwnerHandle)
 	}
 
 	// Outbound federation follows the graph: when a Warpnet user gains a
@@ -176,10 +187,24 @@ func main() {
 	// The federated set is derived from the follow graph stored in Warpnet
 	// (users with an ap: follower), so the gateway keeps no local state and
 	// federation resumes after a restart from the network alone.
-	if nodeCli != nil {
-		of := newOutboundFederation(appCtx, nodeCli, g)
-		g.onFollowed = of.start
-		go of.runScanner(defaultOwnerHandle)
+	//
+	// One federation per network: the scan pages through the users of the network
+	// it runs on, and a user's pollers must read from their own network.
+	if nodes != nil {
+		feds := make(map[*nodeClient]*outboundFederation, len(clients))
+		for _, c := range clients {
+			of := newOutboundFederation(appCtx, c, g)
+			feds[c] = of
+			go of.runScanner(defaultOwnerHandle)
+		}
+		g.onFollowed = func(localUser string) {
+			c, ok := nodes.locate(localUser)
+			if !ok {
+				log.Warnf("gateway: cannot federate %s: no joined network serves it", localUser)
+				return
+			}
+			feds[c].start(localUser)
+		}
 	}
 
 	srv := &http.Server{
@@ -224,8 +249,8 @@ func main() {
 
 	log.Infoln("gateway: shutting down...")
 	appCancel()
-	if nodeCli != nil {
-		nodeCli.close()
+	for _, c := range clients {
+		c.close()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

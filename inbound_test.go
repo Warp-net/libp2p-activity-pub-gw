@@ -129,8 +129,51 @@ func TestTranslateInboundRejectsIncompleteActivities(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			if route, _, ok := g.translateInbound(raw); ok {
+			if route, _, _, ok := g.translateInbound(raw); ok {
 				t.Fatalf("translated to %q, want it refused", route)
+			}
+		})
+	}
+}
+
+// Every translated activity must name the local Warpnet user it targets: with
+// several networks joined that user is what confines the write to the one
+// network that has them (see gateway.requestForUser). A missing one would let an
+// inbound favourite or reply fan out to every network and land in the wrong one.
+func TestTranslateInboundReportsTheTargetedLocalUser(t *testing.T) {
+	g := testGateway(t) // host gw.example
+	const actor = "https://m/users/bob"
+	const status = "https://gw.example/users/alice/statuses/t1"
+
+	cases := map[string]map[string]any{
+		"favourite": {"type": typeLike, "actor": actor, "object": status},
+		"boost":     {"type": typeAnnounce, "actor": actor, "object": status},
+		"reply": {"type": typeCreate, "actor": actor, "object": map[string]any{
+			"type": typeNote, "id": "https://m/users/bob/statuses/9",
+			"content": "hi", "inReplyTo": status,
+		}},
+		"quote": {"type": typeCreate, "actor": actor, "object": map[string]any{
+			"type": typeNote, "id": "https://m/users/bob/statuses/9",
+			"content": "look", "quoteUrl": status,
+		}},
+		"unfollow": {"type": typeUndo, "actor": actor, "object": map[string]any{
+			"type": typeFollow, "object": "https://gw.example/users/alice",
+		}},
+		"unfavourite": {"type": typeUndo, "actor": actor, "object": map[string]any{
+			"type": typeLike, "object": status,
+		}},
+		"unboost": {"type": typeUndo, "actor": actor, "object": map[string]any{
+			"type": typeAnnounce, "object": status,
+		}},
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			route, _, localUser, ok := g.translateInbound(raw)
+			if !ok {
+				t.Fatalf("not translated")
+			}
+			if localUser != "alice" {
+				t.Fatalf("%s -> %s: local user = %q, want alice", name, route, localUser)
 			}
 		})
 	}

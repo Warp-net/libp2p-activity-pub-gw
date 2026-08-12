@@ -1,0 +1,31 @@
+services:
+  fediverse-gateway:
+    container_name: fediverse-gateway
+    image: ghcr.io/warp-net/warpnet-gateway:latest
+    network_mode: host
+    restart: always
+    environment:
+      # Join MAINNET and TESTNET at once — one libp2p node each (:4040, :4041)
+      # in this one process, behind the single ActivityPub host. Bootstrap peers
+      # for both are baked in; a user resolves on whichever network has them.
+      - NODE_NETWORK=warpnet,testnet
+      # Per-node off switches: set either to true to take that node out without
+      # touching NODE_NETWORK. Empty leaves the node running.
+      - GATEWAY_DISABLE_WARPNET=${GATEWAY_DISABLE_WARPNET:-}
+      - GATEWAY_DISABLE_TESTNET=${GATEWAY_DISABLE_TESTNET:-}
+      - GATEWAY_LOGS_TOKEN=${GATEWAY_LOGS_TOKEN:-}
+      # Standalone plain-HTTP /logs listener. With network_mode host this binds
+      # directly on the droplet (http://<host>:4080/logs), still gated by the
+      # token above. Leave empty to disable.
+      - GATEWAY_LOGS_ADDR=${GATEWAY_LOGS_ADDR:-:4080}
+      # Public HTTPS via embedded Tailscale Funnel (no domain, no cert mgmt).
+      # Provide TS_AUTHKEY as a CI secret.
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - GATEWAY_FUNNEL_HOSTNAME=warpnet-gw
+    volumes:
+      # The live Tailscale node identity is in here, and it is what keeps the
+      # public host warpnet-gw.<tailnet>.ts.net — the domain every existing
+      # Fediverse follower has stored — together with the RSA signing key. A
+      # fresh directory registers a NEW tailnet node instead, which Tailscale
+      # names warpnet-gw-1 because warpnet-gw is taken, orphaning every follower.
+      - /root/.warpnet-gateway:/data:rw

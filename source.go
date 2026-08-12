@@ -39,10 +39,10 @@ type warpnetUser struct {
 
 // warpnetSource resolves the Warpnet user a given actor handle maps to.
 //
-// nodeSource (nodeclient.go) is the node-agnostic implementation: it resolves
-// ANY requested handle live from the Warpnet network via PUBLIC_GET_USER.
-// staticSource is a single-user dev fallback, used only when the network is
-// unreachable.
+// multiNode (multinet.go) is what the gateway runs: it resolves ANY requested
+// handle live via PUBLIC_GET_USER, on whichever joined network has the user.
+// nodeSource is the same read against one network. staticSource is a single-user
+// dev fallback, used only when no network is reachable.
 type warpnetSource interface {
 	GetUser(preferredUsername string) (warpnetUser, bool)
 }

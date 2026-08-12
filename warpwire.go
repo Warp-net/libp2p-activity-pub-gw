@@ -53,11 +53,18 @@ const defaultWarpnetNetwork = "warpnet"
 
 // defaultGatewaySeed derives the gateway's stable libp2p identity (warpnet pins
 // the resulting peer id as mastodon.GatewayNodeID, so it is not configurable).
-// defaultP2PListen is its libp2p listen address (relay-only, never advertised).
-const (
-	defaultGatewaySeed = "warpnet-activitypub-gateway"
-	defaultP2PListen   = "/ip4/0.0.0.0/tcp/4040"
-)
+// The same identity is used on every network: they are PSK-isolated, so the peer
+// id can (and must) be the one warpnet expects on each of them.
+const defaultGatewaySeed = "warpnet-activitypub-gateway"
+
+// p2pListenByNetwork is each network's libp2p listen address. The gateway joins
+// every configured network in one process, so each node needs its own port. They
+// are relay-only and never advertised (ForceReachabilityPrivate), so the numbers
+// matter only in that they must not clash — see TestP2PListenAddrsAreDistinct.
+var p2pListenByNetwork = map[string]string{
+	defaultWarpnetNetwork: "/ip4/0.0.0.0/tcp/4040",
+	"testnet":             "/ip4/0.0.0.0/tcp/4041",
+}
 
 // defaultOwnerHandle is the Mastodon account the gateway advertises as its node
 // owner (warpnet pins it as mastodon.EntryHandle, so it is not configurable) so

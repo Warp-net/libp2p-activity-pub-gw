@@ -47,17 +47,21 @@ const (
 // existing handlers. Remote actors travel as ap:-prefixed base64url ids (the
 // follower scheme); the owner and tweet are recovered from our own URLs.
 // Delete is not handled yet (it needs an AP-id -> Warpnet-id mapping).
-func (g *gateway) translateInbound(raw map[string]any) (string, any, bool) {
+//
+// It also reports the local Warpnet user the activity is aimed at. With several
+// networks joined that user picks the one network the write belongs in — see
+// gateway.requestForUser.
+func (g *gateway) translateInbound(raw map[string]any) (string, any, string, bool) {
 	actor, _ := raw[keyActor].(string)
 	if actor == "" {
-		return "", nil, false
+		return "", nil, "", false
 	}
 
 	switch raw[keyType] {
 	case typeLike:
 		owner, tweetID, ok := g.parseLocalStatus(stringField(raw, keyObject))
 		if !ok {
-			return "", nil, false
+			return "", nil, "", false
 		}
 		// OwnerId is the reactor, UserId the reacted tweet's author (the
 		// direction the node's reaction handler and the client both use).
@@ -68,12 +72,12 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, bool) {
 		return routePostReact, reactionEvent{
 			TweetId: tweetID, UserId: owner, OwnerId: bridgedUserID(actor),
 			Emoji: domain.DefaultReaction,
-		}, true
+		}, owner, true
 
 	case typeAnnounce:
 		owner, tweetID, ok := g.parseLocalStatus(stringField(raw, keyObject))
 		if !ok {
-			return "", nil, false
+			return "", nil, "", false
 		}
 		by := bridgedUserID(actor)
 		return routePostRetweet, tweet{
@@ -82,12 +86,12 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, bool) {
 			UserId:      owner,
 			RetweetedBy: &by,
 			CreatedAt:   time.Now(),
-		}, true
+		}, owner, true
 
 	case typeCreate:
 		obj, _ := raw[keyObject].(map[string]any)
 		if obj == nil {
-			return "", nil, false
+			return "", nil, "", false
 		}
 		text := htmlToText(stringField(obj, "content"))
 		owner, parentID, ok := g.parseLocalStatus(stringField(obj, "inReplyTo"))
@@ -114,16 +118,16 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, bool) {
 					RetweetedBy:   &by,
 					QuotedTweetId: &tweetID,
 					QuotedUserId:  &qOwner,
-				}, true
+				}, qOwner, true
 			}
 			// Quote-post convention: the text opens with
 			// "RE: <our status URL>" — treat it as a reply to that status.
 			parentURL, rest, reOK := splitREPrefix(text)
 			if !reOK {
-				return "", nil, false
+				return "", nil, "", false
 			}
 			if owner, parentID, ok = g.parseLocalStatus(parentURL); !ok {
-				return "", nil, false
+				return "", nil, "", false
 			}
 			if rest != "" {
 				text = rest
@@ -142,42 +146,44 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, bool) {
 			Text:         text,
 			UserId:       bridgedUserID(actor),
 			Username:     handleFromActorURL(actor),
-		}, true
+		}, powner, true
 
 	case typeUndo:
 		obj, _ := raw[keyObject].(map[string]any)
 		if obj == nil {
-			return "", nil, false
+			return "", nil, "", false
 		}
 		switch obj[keyType] {
 		case typeFollow:
 			owner := userFromActorURL(stringField(obj, keyObject))
 			if owner == "" {
-				return "", nil, false
+				return "", nil, "", false
 			}
 			return routePostUnfollow, newFollowEvent{
 				FollowerId: bridgedUserID(actor), FollowingId: owner,
-			}, true
+			}, owner, true
 		case typeLike:
 			owner, tweetID, ok := g.parseLocalStatus(stringField(obj, keyObject))
 			if !ok {
-				return "", nil, false
+				return "", nil, "", false
 			}
 			// Unreact drops whatever emoji the reactor had, so it carries none.
 			return routePostUnreact, reactionEvent{
 				TweetId: tweetID, UserId: owner, OwnerId: bridgedUserID(actor),
-			}, true
+			}, owner, true
 		case typeAnnounce:
-			_, tweetID, ok := g.parseLocalStatus(stringField(obj, keyObject))
+			owner, tweetID, ok := g.parseLocalStatus(stringField(obj, keyObject))
 			if !ok {
-				return "", nil, false
+				return "", nil, "", false
 			}
+			// The event carries no local user (only the boosted tweet), but the
+			// owner of the boosted status still picks the network to undo it in.
 			return routePostUnretweet, unretweetEvent{
 				TweetId: tweetID, RetweeterId: bridgedUserID(actor),
-			}, true
+			}, owner, true
 		}
 	}
-	return "", nil, false
+	return "", nil, "", false
 }
 
 // parseLocalStatus extracts the owner username and tweet id from one of our own

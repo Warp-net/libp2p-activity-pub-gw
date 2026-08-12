@@ -17,17 +17,20 @@ The gateway mirrors its recent log lines into an in-memory ring and serves them 
 `/logs`, gated by `GATEWAY_LOGS_TOKEN` (as `?token=` **or** an `Authorization: Bearer`
 header). It is a plain `text/plain` dump of the last ~2000 lines. Two listeners expose it:
 
-- **Standalone plain-HTTP listener** — `GATEWAY_LOGS_ADDR` (testnet `:4080`, bound on the
-  droplet host because the container runs `network_mode: host`):
+- **Standalone plain-HTTP listener** — `GATEWAY_LOGS_ADDR` (`:4080`, bound on the droplet
+  host because the container runs `network_mode: host`):
   `http://<droplet-ip>:4080/logs?token=$GATEWAY_LOGS_TOKEN`
 - **Tailscale Funnel public HTTPS** (:443) — `https://<GATEWAY_FUNNEL_HOSTNAME>.<tailnet>.ts.net/logs?token=$GATEWAY_LOGS_TOKEN`
-  (testnet host `warpnet-gw-testnet.<tailnet>.ts.net`; the prefix is in
-  `deploy/docker-compose-testnet.yml`, the public host is also visible on Mastodon as the
-  `@user@<host>` domain).
+  (host `warpnet-gw.<tailnet>.ts.net`; the prefix is in `deploy/docker-compose.yml`, the
+  public host is also visible on Mastodon as the `@user@<host>` domain).
 
-The droplet ip and the funnel prefix live in `deploy/deploy.sh` and
-`deploy/docker-compose-testnet.yml`. **Never commit the token value** — pass it at call
-time.
+There is exactly **one** gateway deployment and it joins every network in `NODE_NETWORK`
+(mainnet and testnet) in a single process, one libp2p node each — so its logs carry both.
+`multinet:` lines say which network serves a given user, and `nodeclient <peer>: joined
+Warpnet (<network>)` appears once per node at startup; a symptom on one network is read from
+the same `/logs` as the other. The droplet ip lives in `.github/workflows/build-deploy.yaml`
+and the funnel prefix in `deploy/docker-compose.yml`. **Never commit the token value** — pass
+it at call time.
 
 ### Reaching it from a restricted sandbox
 
@@ -44,7 +47,7 @@ curl -sS --proxytunnel -x "$HTTPS_PROXY" \
 only accepts HTTPS CONNECT tunnels". The Funnel HTTPS URL works with a normal
 `-x "$HTTPS_PROXY"` (it is real TLS on :443).
 
-Fallbacks: `docker logs --since 30m fediverse-gateway-testnet` on the droplet
+Fallbacks: `docker logs --since 30m fediverse-gateway` on the droplet
 (`make ssh-do` from the warpnet repo). The Docker remote API on :2375 also carries logs
 but a safety classifier may block raw-daemon access — prefer `/logs`.
 

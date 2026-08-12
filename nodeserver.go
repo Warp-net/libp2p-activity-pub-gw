@@ -231,7 +231,7 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 // reachability, like a NAT'd member node.
 func (c *nodeClient) infoHandler(ownerHandle string) routeHandler {
 	ver, _ := semver.NewVersion("0.0.0")
-	networkName := envOr("NODE_NETWORK", defaultWarpnetNetwork)
+	networkName := c.network // this node's own network, not the whole NODE_NETWORK list
 	return func(context.Context, []byte) (any, error) {
 		addrs := make([]string, 0, len(c.h.Addrs()))
 		for _, a := range c.h.Addrs() {
