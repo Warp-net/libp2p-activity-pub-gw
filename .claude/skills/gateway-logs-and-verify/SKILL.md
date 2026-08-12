@@ -26,11 +26,20 @@ header). It is a plain `text/plain` dump of the last ~2000 lines. Two listeners 
 
 There is exactly **one** gateway deployment and it joins every network in `NODE_NETWORK`
 (mainnet and testnet) in a single process, one libp2p node each — so its logs carry both.
-`multinet:` lines say which network serves a given user, and `nodeclient <peer>: joined
-Warpnet (<network>)` appears once per node at startup; a symptom on one network is read from
-the same `/logs` as the other. The droplet ip lives in `.github/workflows/build-deploy.yaml`
-and the funnel prefix in `deploy/docker-compose.yml`. **Never commit the token value** — pass
-it at call time.
+Read one apart from the other with **`&network=<name>`**:
+
+```sh
+curl -sS --proxytunnel -x "$HTTPS_PROXY" \
+  "http://<droplet-ip>:4080/logs?token=$GATEWAY_LOGS_TOKEN&network=warpnet" -o gwlogs.txt
+```
+
+That keeps the named network's lines plus the ones belonging to no network (the ActivityPub
+surface, the Mastodon bridge), and drops the other network's. Every per-network line is
+rendered with a `[<network>]` tag — `nodeclient`, `nodeserver`, `poller`, `outbound` — so
+a dial failure can be attributed without guessing. `multinet:` lines say which network serves
+a given user. The droplet ip lives in `.github/workflows/build-deploy.yaml` and the funnel
+prefix in `deploy/docker-compose.yml`. **Never commit the token value** — pass it at call
+time.
 
 ### Reaching it from a restricted sandbox
 
@@ -59,7 +68,13 @@ Anchors, and what they mean:
   merged `gatewayVersion`, the droplet was not redeployed. Deploy is manual
   (`workflow_dispatch` "Build & Deploy Testnet"); merging `main` does **not** auto-deploy.
 - `nodeserver: serving N public routes as <peer> (owner <handle>)` — the gateway's libp2p
-  server is up; `<peer>` is what a Warpnet node discovers as the bridged user's node.
+  server is up; `<peer>` is what a Warpnet node discovers as the bridged user's node. It
+  appears **once per joined network**, each tagged `[<network>]`, with the same peer id (the
+  identity is pinned by warpnet and the networks are PSK-isolated).
+- `multinet: <user> is served by <network>` — where that user lives. Everything of theirs
+  (status, media, followers, follows, inbound writes) is then confined to that network; a
+  `cross-network request needs a user to route by` error means a caller failed to name one,
+  which is refused rather than answered from the wrong network.
 - `[<id>] libp2p <route>: N REST calls in <t>` — one inbound libp2p request and how many
   outbound REST fetches it fanned out to. `0 REST calls` on `/private/post/tweet` is a
   **non-reply** correctly skipped (top-level owner tweets arrive here via gossip; only a

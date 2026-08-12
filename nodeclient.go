@@ -49,7 +49,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
-	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -106,7 +105,7 @@ func networkEntries(network string) ([]peer.AddrInfo, error) {
 	for _, s := range bootstrapByNetwork[network] {
 		ai, err := peer.AddrInfoFromString(s)
 		if err != nil {
-			log.Warnf("nodeclient: bad bootstrap %q: %v", s, err)
+			netLog(network).Warnf("nodeclient: bad bootstrap %q: %v", s, err)
 			continue
 		}
 		entries = append(entries, *ai)
@@ -204,7 +203,7 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	for _, e := range entries {
 		relays[e.ID] = struct{}{}
 		if cerr := h.Connect(ctx, e); cerr != nil {
-			log.Warnf("nodeclient: connect %s: %v", e.ID, cerr)
+			netLog(network).Warnf("nodeclient: connect %s: %v", e.ID, cerr)
 			continue
 		}
 		connected++
@@ -216,14 +215,14 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	}
 
 	if berr := kdht.Bootstrap(ctx); berr != nil {
-		log.Warnf("nodeclient: dht bootstrap: %v", berr)
+		netLog(network).Warnf("nodeclient: dht bootstrap: %v", berr)
 	}
 	select {
 	case <-kdht.RefreshRoutingTable():
 	case <-time.After(20 * time.Second):
 	case <-ctx.Done():
 	}
-	log.Infof("nodeclient %v: joined Warpnet (%s) via %d relay(s); discovering members via DHT", h.ID(), network, connected)
+	netLog(network).Infof("nodeclient %v: joined Warpnet via %d relay(s); discovering members via DHT", h.ID(), connected)
 
 	c := &nodeClient{
 		h: h, priv: priv, dht: kdht, network: network, relays: relays,
@@ -249,7 +248,7 @@ func (c *nodeClient) request(route string, payload any) ([]byte, error) {
 		peers = c.memberCandidates()
 	}
 	if len(peers) == 0 {
-		return nil, fmt.Errorf("nodeclient: %s: no Warpnet member nodes discovered yet", route)
+		return nil, fmt.Errorf("nodeclient: %s: %s: no Warpnet member nodes discovered yet", c.network, route)
 	}
 
 	return c.tryMembers(ctx, peers, route, payload)
@@ -298,7 +297,7 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 	for inFlight > 0 {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("nodeclient: %s: %w", route, ctx.Err())
+			return nil, fmt.Errorf("nodeclient: %s: %s: %w", c.network, route, ctx.Err())
 		case r := <-replies:
 			inFlight--
 			if r.err == nil {
@@ -315,7 +314,7 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 	if lastErr == nil {
 		lastErr = errors.New("no reachable member nodes")
 	}
-	return nil, fmt.Errorf("nodeclient: %s failed on all member nodes: %w", route, lastErr)
+	return nil, fmt.Errorf("nodeclient: %s: %s failed on all member nodes: %w", c.network, route, lastErr)
 }
 
 // requestUser streams a user-scoped route directly to the node that OWNS userID
@@ -333,7 +332,7 @@ func (c *nodeClient) requestUser(userID, route string, payload any) ([]byte, err
 			c.remember(owner)
 			return bt, nil
 		}
-		log.Warnf("nodeclient: %s on owner of %s failed, falling back to broadcast: %v", route, userID, err)
+		netLog(c.network).Warnf("nodeclient: %s on owner of %s failed, falling back to broadcast: %v", route, userID, err)
 		c.forgetOwner(userID)
 	}
 	return c.request(route, payload)
@@ -358,11 +357,11 @@ func (c *nodeClient) ownerNode(userID string) (peer.ID, bool) {
 	}
 	p, err := peer.Decode(u.NodeId)
 	if err != nil {
-		log.Warnf("nodeclient: bad node_id %q for %s: %v", u.NodeId, userID, err)
+		netLog(c.network).Warnf("nodeclient: bad node_id %q for %s: %v", u.NodeId, userID, err)
 		return "", false
 	}
 	c.owner.Add(userID, p)
-	log.Infof("nodeclient: owner of %s resolved to node %s; user-scoped routes target it directly", userID, p)
+	netLog(c.network).Infof("nodeclient: owner of %s resolved to node %s; user-scoped routes target it directly", userID, p)
 	return p, true
 }
 
@@ -402,7 +401,7 @@ func (s nodeSource) GetUser(preferredUsername string) (warpnetUser, bool) {
 func (c *nodeClient) lookupUser(preferredUsername string) (warpnetUser, bool) {
 	bt, err := c.request(routeGetUser, getUserEvent{UserId: preferredUsername})
 	if err != nil {
-		log.Debugf("nodesource: %s: get user %s: %v", c.network, preferredUsername, err)
+		netLog(c.network).Debugf("nodesource: get user %s: %v", preferredUsername, err)
 		return warpnetUser{}, false
 	}
 	var u user

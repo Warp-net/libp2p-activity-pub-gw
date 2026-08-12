@@ -43,6 +43,7 @@ type outboundFederation struct {
 	ctx     context.Context
 	req     nodeRequester
 	g       *gateway
+	network string // the network req is bound to; tags this federation's logs
 	mu      sync.Mutex
 	started map[string]context.CancelFunc
 	// emptyScans counts consecutive scans that read no ap: follower for a user.
@@ -52,7 +53,7 @@ type outboundFederation struct {
 
 func newOutboundFederation(ctx context.Context, req nodeRequester, g *gateway) *outboundFederation {
 	return &outboundFederation{
-		ctx: ctx, req: req, g: g,
+		ctx: ctx, req: req, g: g, network: networkOf(req),
 		started:    map[string]context.CancelFunc{},
 		emptyScans: map[string]int{},
 	}
@@ -79,7 +80,7 @@ func (o *outboundFederation) start(localUser string) {
 	}
 	ctx, cancel := context.WithCancel(o.ctx)
 	o.started[localUser] = cancel
-	log.Infof("outbound: federating %s", localUser)
+	netLog(o.network).Infof("outbound: federating %s", localUser)
 	go newTweetPoller(o.req, localUser, o.g.publishNote).run(ctx)
 	go newFollowPoller(o.req, o.g, localUser,
 		func(actorURL string) { o.g.sendFollow(localUser, actorURL) },
@@ -101,7 +102,7 @@ func (o *outboundFederation) stop(localUser string) {
 	}
 	delete(o.started, localUser)
 	cancel()
-	log.Infof("outbound: stopped federating %s", localUser)
+	netLog(o.network).Infof("outbound: stopped federating %s", localUser)
 }
 
 const followPollInterval = 30 * time.Second
@@ -112,6 +113,7 @@ const followPollInterval = 30 * time.Second
 // records a baseline (history isn't replayed), matching the tweet poller.
 type followPoller struct {
 	req        nodeRequester
+	network    string
 	resolver   actorResolver
 	owner      string
 	onFollow   func(actorURL string)
@@ -125,6 +127,7 @@ func newFollowPoller(
 ) *followPoller {
 	return &followPoller{
 		req:        req,
+		network:    networkOf(req),
 		resolver:   resolver,
 		owner:      owner,
 		onFollow:   onFollow,
@@ -138,7 +141,7 @@ func (p *followPoller) run(ctx context.Context) {
 	defer t.Stop()
 	for {
 		if err := p.poll(); err != nil {
-			log.Warnf("follow poll: %v", err)
+			netLog(p.network).Warnf("follow poll: %v", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -172,7 +175,7 @@ func (p *followPoller) poll() error {
 		actorURL, rerr := p.resolver.resolveActorID(ctx, id)
 		cancel()
 		if rerr != nil {
-			log.Warnf("follow poll: resolving %s: %v", id, rerr)
+			netLog(p.network).Warnf("follow poll: resolving %s: %v", id, rerr)
 			continue
 		}
 		current[actorURL] = true
@@ -185,7 +188,7 @@ func (p *followPoller) poll() error {
 	if len(current) == 0 && len(p.known) > 0 {
 		// A read failure is far likelier than every follow vanishing at once;
 		// skip the round rather than mass-unfollow on remote instances.
-		log.Warnf("follow poll: %s: followings went empty (had %d) — skipping round", p.owner, len(p.known))
+		netLog(p.network).Warnf("follow poll: %s: followings went empty (had %d) — skipping round", p.owner, len(p.known))
 		return nil
 	}
 	for actorURL := range current {
@@ -288,12 +291,12 @@ func (o *outboundFederation) scan(scanUser string) {
 		}
 		bt, err := o.req.request(routeGetUsers, ev)
 		if err != nil {
-			log.Warnf("outbound: scan users: %v", err)
+			netLog(o.network).Warnf("outbound: scan users: %v", err)
 			return
 		}
 		var resp usersResponse
 		if uerr := json.Unmarshal(bt, &resp); uerr != nil {
-			log.Warnf("outbound: scan users: bad response: %v", uerr)
+			netLog(o.network).Warnf("outbound: scan users: bad response: %v", uerr)
 			return
 		}
 		for _, u := range resp.Users {

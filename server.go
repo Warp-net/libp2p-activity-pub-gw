@@ -235,6 +235,9 @@ func (g *gateway) logsHandler() http.Handler {
 // GATEWAY_LOGS_TOKEN (supplied as ?token= or a Bearer header): the endpoint is
 // disabled (404) unless a token is configured, so the Funnel-exposed gateway
 // never leaks its logs publicly by default.
+//
+// ?network=<name> reads one Warpnet network apart from the others: its own lines
+// plus the ones belonging to no network. Without it, every network is returned.
 func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if g.logsToken == "" || g.logs == nil {
 		http.NotFound(w, r)
@@ -250,7 +253,7 @@ func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set(headerContentType, "text/plain; charset=utf-8")
-	for _, line := range g.logs.lines() {
+	for _, line := range g.logs.lines(r.URL.Query().Get("network")) {
 		_, _ = io.WriteString(w, line+"\n")
 	}
 }

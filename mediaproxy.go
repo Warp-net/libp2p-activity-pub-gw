@@ -67,7 +67,8 @@ func (g *gateway) handleMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bt, err := g.req.request(routeGetImage, getImageEvent{UserId: userID, Key: key})
+	// The media ref names the owning user, so the read stays on their network.
+	bt, err := g.requestForUser(userID, routeGetImage, getImageEvent{UserId: userID, Key: key})
 	if err != nil {
 		log.Errorf("media: fetch %s/%s: %v", userID, key, err)
 		http.Error(w, "fetch failed", http.StatusBadGateway)

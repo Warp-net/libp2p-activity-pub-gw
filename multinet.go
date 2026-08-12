@@ -59,7 +59,10 @@ const (
 	homeCacheTTL  = 30 * time.Minute
 )
 
-var errNoHomeNetwork = errors.New("no joined Warpnet network serves this user")
+var (
+	errNoHomeNetwork = errors.New("no joined Warpnet network serves this user")
+	errNoRoutingUser = errors.New("cross-network request needs a user to route by")
+)
 
 // configuredNetworks lists the networks to join. NODE_NETWORK holds one name or
 // a comma-separated list ("warpnet,testnet"), so a single-network deployment
@@ -228,37 +231,20 @@ func (m *multiNode) GetUser(preferredUsername string) (warpnetUser, bool) {
 	return u, true
 }
 
-// request streams a route that is not scoped to a user (a tweet, an image, a
-// profile). Those are reads, so the networks are raced and the first answer
-// wins; a write must use requestIn or requestUser instead.
+// request carries no user to route by, so it cannot pick a network. With one
+// joined network there is nothing to pick; with several, serving it would mean
+// racing them and letting whichever answers first speak for a user who may live
+// on another — a testnet node answering for a mainnet user's status or avatar.
+// It refuses instead, so a caller that has a user must say so (requestIn /
+// requestUser) and one that has none fails loudly rather than leaking across.
 func (m *multiNode) request(route string, payload any) ([]byte, error) {
-	if len(m.clients) == 0 {
+	switch len(m.clients) {
+	case 0:
 		return nil, fmt.Errorf("multinet: %s: %w", route, errNoHomeNetwork)
-	}
-	if len(m.clients) == 1 {
+	case 1:
 		return m.clients[0].request(route, payload)
 	}
-
-	type reply struct {
-		bt  []byte
-		err error
-	}
-	replies := make(chan reply, len(m.clients))
-	for _, c := range m.clients {
-		go func(c *nodeClient) {
-			bt, err := c.request(route, payload)
-			replies <- reply{bt: bt, err: err}
-		}(c)
-	}
-	var lastErr error
-	for range m.clients {
-		r := <-replies
-		if r.err == nil {
-			return r.bt, nil
-		}
-		lastErr = r.err
-	}
-	return nil, fmt.Errorf("multinet: %s failed on every network (%s): %w", route, m.networks(), lastErr)
+	return nil, fmt.Errorf("multinet: %s: %w (%s)", route, errNoRoutingUser, m.networks())
 }
 
 // requestUser streams a user-scoped route to the network that serves userID, and
@@ -292,12 +278,45 @@ type networkScoped interface {
 	requestIn(localUser, route string, payload any) ([]byte, error)
 }
 
-// requestForUser sends an inbound write into the network that serves localUser.
-// With one network (or an unknown user) it is a plain broadcast, exactly as
-// before multi-network support.
+// logFieldNetwork tags a log line with the network it came from. The gateway
+// runs a node per network in one process, so without it a failure cannot be
+// attributed to one; logRing renders it and /logs?network= filters on it.
+const logFieldNetwork = "net"
+
+// netLog returns a logger tagged with network. An empty name yields an untagged
+// logger, for the parts that serve every network alike (the ActivityPub surface,
+// the Mastodon bridge).
+func netLog(network string) *log.Entry {
+	if network == "" {
+		return log.NewEntry(log.StandardLogger())
+	}
+	return log.WithField(logFieldNetwork, network)
+}
+
+// networkNamer is implemented by a requester bound to a single network, so the
+// components it drives can tag their logs with it without being handed the name.
+type networkNamer interface {
+	networkName() string
+}
+
+func (c *nodeClient) networkName() string { return c.network }
+
+// networkOf names the network a requester is bound to, or "" when it spans
+// several (or is a test fake).
+func networkOf(req nodeRequester) string {
+	if n, ok := req.(networkNamer); ok {
+		return n.networkName()
+	}
+	return ""
+}
+
+// requestForUser sends a request that belongs to localUser into that user's
+// network — inbound Fediverse writes, and the reads behind their own status and
+// media urls. It never falls back to another network: with one network there is
+// none to fall back to, and with several, falling back is the leak.
 func (g *gateway) requestForUser(localUser, route string, payload any) ([]byte, error) {
-	if scoped, ok := g.req.(networkScoped); ok && localUser != "" {
+	if scoped, ok := g.req.(networkScoped); ok {
 		return scoped.requestIn(localUser, route, payload)
 	}
-	return g.req.request(route, payload)
+	return g.req.request(route, payload) // single-network requester: no wrong network to reach
 }
