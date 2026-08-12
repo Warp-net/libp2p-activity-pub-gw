@@ -17,16 +17,17 @@ The gateway mirrors its recent log lines into an in-memory ring and serves them 
 `/logs`, gated by `GATEWAY_LOGS_TOKEN` (as `?token=` **or** an `Authorization: Bearer`
 header). It is a plain `text/plain` dump of the last ~2000 lines. Two listeners expose it:
 
-- **Standalone plain-HTTP listener** — `GATEWAY_LOGS_ADDR` (testnet `:4080`, bound on the
-  droplet host because the container runs `network_mode: host`):
+- **Standalone plain-HTTP listener** — `GATEWAY_LOGS_ADDR`, bound on the droplet host
+  (testnet `:4080` via `network_mode: host`, mainnet `:4081` published from the container):
   `http://<droplet-ip>:4080/logs?token=$GATEWAY_LOGS_TOKEN`
 - **Tailscale Funnel public HTTPS** (:443) — `https://<GATEWAY_FUNNEL_HOSTNAME>.<tailnet>.ts.net/logs?token=$GATEWAY_LOGS_TOKEN`
-  (testnet host `warpnet-gw-testnet.<tailnet>.ts.net`; the prefix is in
-  `deploy/docker-compose-testnet.yml`, the public host is also visible on Mastodon as the
-  `@user@<host>` domain).
+  (testnet host `warpnet-gw-testnet.<tailnet>.ts.net`, mainnet `warpnet-gw.<tailnet>.ts.net`;
+  the prefix is in `deploy/docker-compose-<network>.yml`, the public host is also visible on
+  Mastodon as the `@user@<host>` domain).
 
-The droplet ip and the funnel prefix live in `deploy/deploy.sh` and
-`deploy/docker-compose-testnet.yml`. **Never commit the token value** — pass it at call
+Both networks run on the same droplet, so pick the port/host of the one you are debugging.
+The droplet ip lives in `.github/workflows/build-deploy-<network>.yaml` and the funnel prefix
+in `deploy/docker-compose-<network>.yml`. **Never commit the token value** — pass it at call
 time.
 
 ### Reaching it from a restricted sandbox
