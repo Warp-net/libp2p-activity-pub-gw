@@ -48,7 +48,6 @@ import (
 	"github.com/Warp-net/warpnet/security"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/protocol"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -168,7 +167,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 	for route, h := range handlers {
 		c.h.SetStreamHandler(protocol.ID(route), c.streamHandler(route, h))
 	}
-	log.Infof("nodeserver: serving %d public routes as %s (owner %s)", len(handlers), c.h.ID(), ownerHandle)
+	netLog(c.network).Infof("nodeserver: serving %d public routes as %s (owner %s)", len(handlers), c.h.ID(), ownerHandle)
 }
 
 // streamHandler reads the signed request envelope, verifies it against the
@@ -180,24 +179,24 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 
 		data, err := io.ReadAll(io.LimitReader(s, maxRequestBytes))
 		if err != nil {
-			log.Warnf("nodeserver: %s: read: %v", route, err)
+			netLog(c.network).Warnf("nodeserver: %s: read: %v", route, err)
 			return
 		}
 		var msg message
 		if uerr := wjson.Unmarshal(data, &msg); uerr != nil {
-			log.Warnf("nodeserver: %s: bad envelope: %v", route, uerr)
+			netLog(c.network).Warnf("nodeserver: %s: bad envelope: %v", route, uerr)
 			return
 		}
 		// Signature is mandatory, like the node's auth middleware: an unsigned
 		// envelope must not bypass verification.
 		if msg.Signature == "" {
-			log.Warnf("nodeserver: %s: signature missing", route)
+			netLog(c.network).Warnf("nodeserver: %s: signature missing", route)
 			return
 		}
 		if conn := s.Conn(); conn != nil {
 			pub := warpnet.FromIDToPubKey(conn.RemotePeer())
 			if verr := security.VerifySignature(pub, msg.SigningBytes(), msg.Signature); verr != nil {
-				log.Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
+				netLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
 				return
 			}
 		}
@@ -210,18 +209,18 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 		ctx, tr := startTrace(ctx)
 		start := time.Now()
 		resp, herr := h(ctx, msg.Body)
-		log.Infof("[%s] libp2p %s: %d REST calls in %s", tr.id, route, tr.calls.Load(), time.Since(start).Round(time.Millisecond))
+		netLog(c.network).Infof("[%s] libp2p %s: %d REST calls in %s", tr.id, route, tr.calls.Load(), time.Since(start).Round(time.Millisecond))
 		if herr != nil {
-			log.Warnf("nodeserver: %s: %v", route, herr)
+			netLog(c.network).Warnf("nodeserver: %s: %v", route, herr)
 			resp = event.ResponseError{Message: herr.Error()}
 		}
 		out, merr := wjson.Marshal(resp)
 		if merr != nil {
-			log.Errorf("nodeserver: %s: marshal response: %v", route, merr)
+			netLog(c.network).Errorf("nodeserver: %s: marshal response: %v", route, merr)
 			return
 		}
 		if _, werr := s.Write(out); werr != nil {
-			log.Warnf("nodeserver: %s: write: %v", route, werr)
+			netLog(c.network).Warnf("nodeserver: %s: write: %v", route, werr)
 		}
 	}
 }

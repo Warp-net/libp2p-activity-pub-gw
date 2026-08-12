@@ -116,7 +116,10 @@ func (g *gateway) serveStatus(w http.ResponseWriter, r *http.Request, user, twee
 	if parent := r.URL.Query().Get(replyParentQuery); parent != "" {
 		req.ParentId = parent
 	}
-	bt, err := g.req.request(routeGetTweet, req)
+	// Read it from the network that serves this user, never from the others: the
+	// status url names its owner, and a blind fan-out would let another network
+	// answer for them.
+	bt, err := g.requestForUser(user, routeGetTweet, req)
 	if err != nil {
 		log.Warnf("status: fetch %s/%s: %v", user, tweetID, err)
 		http.NotFound(w, r)

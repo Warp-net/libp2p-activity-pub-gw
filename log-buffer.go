@@ -40,21 +40,38 @@ import (
 // and in memory only (never on disk) — it keeps the gateway stateless.
 type logRing struct {
 	mu   sync.Mutex
-	buf  []string
+	buf  []logLine
 	size int
 	next int
 	full bool
 }
 
+// logLine is one buffered line and the Warpnet network it came from, so the
+// networks the gateway runs side by side can be read apart. An empty network
+// means the line belongs to none of them (the ActivityPub surface, the Mastodon
+// bridge) and shows up whichever network is being read.
+type logLine struct {
+	text    string
+	network string
+}
+
 func newLogRing(size int) *logRing {
-	return &logRing{buf: make([]string, size), size: size}
+	return &logRing{buf: make([]logLine, size), size: size}
 }
 
 // Levels/Fire implement logrus.Hook: every emitted entry is formatted and stored.
 func (lr *logRing) Levels() []log.Level { return log.AllLevels }
 
 func (lr *logRing) Fire(e *log.Entry) error {
-	line := fmt.Sprintf("%s %-5s %s", e.Time.Format(time.DateTime), e.Level.String(), e.Message)
+	network, _ := e.Data[logFieldNetwork].(string)
+	tag := ""
+	if network != "" {
+		tag = "[" + network + "] "
+	}
+	line := logLine{
+		text:    fmt.Sprintf("%s %-5s %s%s", e.Time.Format(time.DateTime), e.Level.String(), tag, e.Message),
+		network: network,
+	}
 	lr.mu.Lock()
 	lr.buf[lr.next] = line
 	lr.next = (lr.next + 1) % lr.size
@@ -65,17 +82,27 @@ func (lr *logRing) Fire(e *log.Entry) error {
 	return nil
 }
 
-// lines returns the buffered log lines oldest-first.
-func (lr *logRing) lines() []string {
+// lines returns the buffered log lines oldest-first. A non-empty network keeps
+// only that network's lines plus the untagged ones, so one network can be read
+// without the other's traffic in the way; an empty network returns everything.
+func (lr *logRing) lines(network string) []string {
 	lr.mu.Lock()
 	defer lr.mu.Unlock()
+
+	ordered := make([]logLine, 0, lr.size)
 	if !lr.full {
-		out := make([]string, lr.next)
-		copy(out, lr.buf[:lr.next])
-		return out
+		ordered = append(ordered, lr.buf[:lr.next]...)
+	} else {
+		ordered = append(ordered, lr.buf[lr.next:]...)
+		ordered = append(ordered, lr.buf[:lr.next]...)
 	}
-	out := make([]string, 0, lr.size)
-	out = append(out, lr.buf[lr.next:]...)
-	out = append(out, lr.buf[:lr.next]...)
+
+	out := make([]string, 0, len(ordered))
+	for _, l := range ordered {
+		if network != "" && l.network != "" && l.network != network {
+			continue
+		}
+		out = append(out, l.text)
+	}
 	return out
 }

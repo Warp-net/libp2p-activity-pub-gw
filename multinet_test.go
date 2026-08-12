@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -253,32 +255,47 @@ func TestMultiNodeWithOneNetworkSkipsLocation(t *testing.T) {
 	}
 }
 
-func TestMultiNodeRacesReadsAcrossNetworks(t *testing.T) {
-	main := newStubNet(t, "warpnet")
-	test := newStubNet(t, "testnet")
+// A request with no user to route by must not be served by racing the networks:
+// whichever answered first would be speaking for a user who may live on the
+// other one. It fails closed instead, so a leak cannot be reintroduced by a
+// caller that simply forgets to name the user.
+func TestMultiNodeRefusesARequestItCannotRoute(t *testing.T) {
+	main := newStubNet(t, "warpnet", "alice")
+	test := newStubNet(t, "testnet", "bob")
 	m := newMultiNode([]*nodeClient{main.client, test.client})
 
-	t.Run("one network answering is enough", func(t *testing.T) {
-		main.mu.Lock()
-		main.fail = errors.New("warpnet down")
-		main.mu.Unlock()
-		if _, err := m.request(routeGetTweet, getTweetEvent{TweetId: "t1"}); err != nil {
-			t.Fatalf("read = %v, want the healthy network's answer", err)
-		}
-	})
+	_, err := m.request(routeGetTweet, getTweetEvent{TweetId: "t1"})
+	if !errors.Is(err, errNoRoutingUser) {
+		t.Fatalf("err = %v, want errNoRoutingUser", err)
+	}
+	if len(main.routes()) != 0 || len(test.routes()) != 0 {
+		t.Fatalf("asked a network anyway: warpnet=%v testnet=%v", main.routes(), test.routes())
+	}
 
-	t.Run("every network failing names them all", func(t *testing.T) {
-		test.mu.Lock()
-		test.fail = errors.New("testnet down")
-		test.mu.Unlock()
-		_, err := m.request(routeGetTweet, getTweetEvent{TweetId: "t1"})
-		if err == nil {
-			t.Fatal("want an error when no network answers")
-		}
-		if !strings.Contains(err.Error(), "warpnet") || !strings.Contains(err.Error(), "testnet") {
-			t.Fatalf("err = %q, want both networks named", err)
-		}
-	})
+	// Named, it is served — by that user's network only.
+	if _, err := m.requestIn("bob", routeGetTweet, getTweetEvent{TweetId: "t1"}); err != nil {
+		t.Fatalf("routed read: %v", err)
+	}
+	if len(main.routes()) != 0 {
+		t.Fatalf("warpnet served %v for a testnet user", main.routes())
+	}
+	if got := test.routes(); len(got) != 1 || got[0] != routeGetTweet {
+		t.Fatalf("testnet routes = %v", got)
+	}
+}
+
+// With a single network there is no other network to reach, so an unrouted
+// request is still served — the pre-multi-network behaviour.
+func TestMultiNodeWithOneNetworkServesUnroutedRequests(t *testing.T) {
+	only := newStubNet(t, "warpnet")
+	m := newMultiNode([]*nodeClient{only.client})
+
+	if _, err := m.request(routeGetTweet, getTweetEvent{TweetId: "t1"}); err != nil {
+		t.Fatalf("single-network read: %v", err)
+	}
+	if got := only.routes(); len(got) != 1 || got[0] != routeGetTweet {
+		t.Fatalf("routes = %v", got)
+	}
 }
 
 // A requester that spans no networks (the single-node client, or a test fake)
@@ -293,5 +310,58 @@ func TestRequestForUserFallsBackToBroadcast(t *testing.T) {
 	}
 	if fake.lastRoute != routePostReact {
 		t.Fatalf("route = %q, want the reaction broadcast", fake.lastRoute)
+	}
+}
+
+// The public ActivityPub surface is shared by every network, but each url names
+// its owner — so serving one must never read from another user's network. A
+// testnet node answering for a mainnet user's status or avatar is exactly the
+// cross-network leak this guards.
+func TestPublicSurfaceReadsStayOnTheOwnersNetwork(t *testing.T) {
+	main := newStubNet(t, "warpnet", "alice")
+	test := newStubNet(t, "testnet", "bob")
+	m := newMultiNode([]*nodeClient{main.client, test.client})
+
+	g := testGateway(t)
+	g.req = m
+	g.source = m
+	srv := httptest.NewServer(g.routes())
+	defer srv.Close()
+
+	cases := map[string]struct {
+		path            string
+		owner, intruder *stubNet
+	}{
+		"a mainnet user's status is not read from testnet": {
+			path: pathUsers + "alice" + pathStatuses + "t1", owner: main, intruder: test,
+		},
+		"a testnet user's status is not read from mainnet": {
+			path: pathUsers + "bob" + pathStatuses + "t2", owner: test, intruder: main,
+		},
+		"a mainnet user's media is not read from testnet": {
+			path: pathMedia + encodeMediaRef("alice", "avatar-key"), owner: main, intruder: test,
+		},
+		"a testnet user's media is not read from mainnet": {
+			path: pathMedia + encodeMediaRef("bob", "avatar-key"), owner: test, intruder: main,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			main.reset()
+			test.reset()
+
+			resp, err := http.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+
+			if got := tc.intruder.routes(); len(got) != 0 {
+				t.Fatalf("%s was asked %v for a user it does not serve", tc.intruder.client.network, got)
+			}
+			if got := tc.owner.routes(); len(got) == 0 {
+				t.Fatalf("%s was never asked, so the read went nowhere", tc.owner.client.network)
+			}
+		})
 	}
 }

@@ -2042,3 +2042,43 @@ func TestSelfLoopRefused(t *testing.T) {
 		}
 	})
 }
+
+// /logs?network= reads one network apart from the other, so an operator
+// debugging mainnet is not wading through testnet's traffic.
+func TestLogsEndpointFiltersByNetwork(t *testing.T) {
+	g := testGateway(t)
+	g.logsToken = "sekret"
+	ring := newLogRing(10)
+	for _, l := range []struct{ network, msg string }{
+		{"warpnet", "mainnet line"},
+		{"testnet", "testnet line"},
+		{"", "shared line"},
+	} {
+		e := &log.Entry{Time: time.Now(), Level: log.InfoLevel, Message: l.msg}
+		if l.network != "" {
+			e.Data = log.Fields{logFieldNetwork: l.network}
+		}
+		_ = ring.Fire(e)
+	}
+	g.logs = ring
+
+	get := func(query string) string {
+		rec := httptest.NewRecorder()
+		g.handleLogs(rec, httptest.NewRequest(http.MethodGet, "/logs?token=sekret"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d", rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	got := get("&network=warpnet")
+	if !strings.Contains(got, "mainnet line") || !strings.Contains(got, "shared line") {
+		t.Fatalf("warpnet view lost its own or the shared line: %q", got)
+	}
+	if strings.Contains(got, "testnet line") {
+		t.Fatalf("testnet leaked into the warpnet view: %q", got)
+	}
+	if all := get(""); !strings.Contains(all, "testnet line") || !strings.Contains(all, "mainnet line") {
+		t.Fatalf("unfiltered view is missing a network: %q", all)
+	}
+}

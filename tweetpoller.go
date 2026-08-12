@@ -33,7 +33,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -53,6 +52,7 @@ const (
 // The seen set is a bounded expirable LRU, never unbounded growth.
 type tweetPoller struct {
 	req      nodeRequester
+	network  string
 	owner    string
 	interval time.Duration
 	seen     *expirable.LRU[string, struct{}]
@@ -62,6 +62,7 @@ type tweetPoller struct {
 func newTweetPoller(req nodeRequester, owner string, publish func(context.Context, string, tweet)) *tweetPoller {
 	return &tweetPoller{
 		req:      req,
+		network:  networkOf(req),
 		owner:    owner,
 		interval: tweetPollInterval,
 		seen:     expirable.NewLRU[string, struct{}](tweetSeenSize, nil, tweetSeenTTL),
@@ -74,7 +75,7 @@ func (p *tweetPoller) run(ctx context.Context) {
 	for _, t := range seed {
 		p.seen.Add(t.Id, struct{}{})
 	}
-	log.Infof("poller: started for %s (seeded %d existing tweets)", p.owner, len(seed))
+	netLog(p.network).Infof("poller: started for %s (seeded %d existing tweets)", p.owner, len(seed))
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 	for {
@@ -102,18 +103,18 @@ func (p *tweetPoller) poll(ctx context.Context) {
 			p.publish(ctx, p.owner, t)
 		}
 	}
-	log.Infof("poller: %s: fetched %d, new %d, publishable %d", p.owner, len(tweets), newCount, pubCount)
+	netLog(p.network).Infof("poller: %s: fetched %d, new %d, publishable %d", p.owner, len(tweets), newCount, pubCount)
 }
 
 func (p *tweetPoller) fetch() []tweet {
 	bt, err := p.req.requestUser(p.owner, routeGetTweets, getAllTweetsEvent{UserId: p.owner})
 	if err != nil {
-		log.Errorf("poller: get tweets for %s: %v", p.owner, err)
+		netLog(p.network).Errorf("poller: get tweets for %s: %v", p.owner, err)
 		return nil
 	}
 	var resp tweetsResponse
 	if jerr := json.Unmarshal(bt, &resp); jerr != nil {
-		log.Errorf("poller: decode tweets: %v", jerr)
+		netLog(p.network).Errorf("poller: decode tweets: %v", jerr)
 		return nil
 	}
 	return resp.Tweets
