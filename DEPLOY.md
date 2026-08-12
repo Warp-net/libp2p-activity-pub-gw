@@ -75,6 +75,14 @@ an unset or unparseable value leaves it running, so a typo can't silently drop a
 network. If every network ends up disabled or unreachable, the gateway serves
 the static profile only.
 
+> [!IMPORTANT]
+> **Run only one gateway per network.** The libp2p identity comes from a fixed
+> seed (warpnet pins the peer id), so a second gateway joining a network the
+> first one is already on fights it for that identity, and requests reach
+> whichever wins. Since one process covers every network, one deployment is the
+> whole deployment — use `GATEWAY_DISABLE_<NETWORK>` to narrow it rather than
+> running a second gateway alongside.
+
 ---
 
 ## C. Build and run (Docker)

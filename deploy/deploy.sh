@@ -1,13 +1,7 @@
 #!/bin/bash
 set -e
 
-# Which network to deploy: "testnet" (default) or "mainnet". Each gets its own
-# compose file, project, container and /data dir, so both run on one host.
-NETWORK="${NETWORK:-testnet}"
-PROJECT="warpnet-gateway-$NETWORK"
-COMPOSE="gateway-$NETWORK/docker-compose-$NETWORK.yml"
-
-echo "Run fediverse-gateway deploy script ($NETWORK)"
+echo "Run fediverse-gateway deploy script"
 
 echo "GITHUB_TOKEN: ${GITHUB_TOKEN:0:4}... (truncated for security)"
 
@@ -19,8 +13,15 @@ fi
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u filinvadim --password-stdin
 docker pull ghcr.io/warp-net/warpnet-gateway:latest
 
-mkdir -p "/root/gateway-$NETWORK"
-mv "docker-compose-$NETWORK.yml" "$COMPOSE"
-docker compose -p "$PROJECT" -f "$COMPOSE" down --remove-orphans
-docker compose -p "$PROJECT" -f "$COMPOSE" up -d
+# One gateway process serves every network, and there can only be one: the
+# libp2p identity comes from a fixed seed, so a second gateway on the same
+# network fights this one for the peer id, and both would drive the same
+# Tailscale node out of /data. Retire the old testnet-only stack — a no-op once
+# it is gone.
+docker rm -f fediverse-gateway-testnet >/dev/null 2>&1 || true
+
+mkdir -p /root/gateway
+mv docker-compose.yml gateway/docker-compose.yml
+docker compose -p warpnet-gateway -f gateway/docker-compose.yml down --remove-orphans
+docker compose -p warpnet-gateway -f gateway/docker-compose.yml up -d
 docker image prune --force

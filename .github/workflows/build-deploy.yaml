@@ -1,4 +1,4 @@
-name: Build & Deploy Mainnet
+name: Build & Deploy Gateway
 
 on:
   workflow_dispatch:
@@ -54,8 +54,8 @@ jobs:
           # exits non-zero and bash -e fails the whole job.
           ssh-keyscan -H -T 15 207.154.221.44 >> ~/.ssh/known_hosts || true
 
-      - name: Deploy to Mainnet DO Droplet
+      - name: Deploy to DO Droplet
         run: |
           scp -o StrictHostKeyChecking=accept-new ./deploy/deploy.sh root@207.154.221.44:/root
-          scp -o StrictHostKeyChecking=accept-new ./deploy/docker-compose-mainnet.yml root@207.154.221.44:/root/docker-compose-mainnet.yml
-          ssh -o StrictHostKeyChecking=accept-new root@207.154.221.44 'NETWORK=mainnet GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} TS_AUTHKEY=${{ secrets.TS_AUTHKEY }} GATEWAY_LOGS_TOKEN=${{ secrets.GATEWAY_LOGS_TOKEN }} bash /root/deploy.sh'
+          scp -o StrictHostKeyChecking=accept-new ./deploy/docker-compose.yml root@207.154.221.44:/root/docker-compose.yml
+          ssh -o StrictHostKeyChecking=accept-new root@207.154.221.44 'GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} TS_AUTHKEY=${{ secrets.TS_AUTHKEY }} GATEWAY_LOGS_TOKEN=${{ secrets.GATEWAY_LOGS_TOKEN }} bash /root/deploy.sh'
