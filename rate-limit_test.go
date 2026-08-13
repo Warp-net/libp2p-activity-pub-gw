@@ -86,6 +86,7 @@ func TestIsControlPlane(t *testing.T) {
 		pathStatic + "warpnet.png":          false,
 		"/.well-known/nodeinfo":             false,
 		"/logs":                             false,
+		"/debug/pprof/heap":                 false,
 	}
 	for p, want := range cases {
 		if got := isControlPlane(p); got != want {
