@@ -1,6 +1,6 @@
 ---
 name: gateway-logs-and-verify
-description: Use this skill whenever an activity-pub-gw change or Fediverse bridging bug needs real evidence — any task phrased as "get the gateway logs", "why didn't the reply/like/follow reach Mastodon", "is it federating", "check it end-to-end on the testnet gateway", "verify locally before pushing", "did the deploy actually take", or when a Warpnet↔Fediverse symptom (reply invisible, 404 on a status, follow not applied) needs to be traced through the running gateway rather than guessed from code. It documents how to pull the gateway's live `/logs`, read them, verify against the real Mastodon thread, and run the local build/test + pinned-warpnet drift check. Do NOT use it to design a new public route (that is warpnet-add-handler in the node repo) — use it to diagnose and prove an existing bridge behaves correctly.
+description: Use this skill whenever an activity-pub-gw change or Fediverse bridging bug needs real evidence — any task phrased as "get the gateway logs", "why didn't the reply/like/follow reach Mastodon", "is it federating", "check it end-to-end on the testnet gateway", "verify locally before pushing", "did the deploy actually take", "profile the gateway", "the gateway is leaking memory / eating CPU / hung", or when a Warpnet↔Fediverse symptom (reply invisible, 404 on a status, follow not applied) needs to be traced through the running gateway rather than guessed from code. It documents how to pull the gateway's live `/logs`, profile the running process over `/debug/pprof`, read both, verify against the real Mastodon thread, and run the local build/test + pinned-warpnet drift check. Do NOT use it to design a new public route (that is warpnet-add-handler in the node repo) — use it to diagnose and prove an existing bridge behaves correctly.
 ---
 
 # Getting gateway logs and verifying activity-pub-gw
@@ -59,6 +59,43 @@ only accepts HTTPS CONNECT tunnels". The Funnel HTTPS URL works with a normal
 Fallbacks: `docker logs --since 30m fediverse-gateway` on the droplet
 (`make ssh-do` from the warpnet repo). The Docker remote API on :2375 also carries logs
 but a safety classifier may block raw-daemon access — prefer `/logs`.
+
+### Profile the live process (`/debug/pprof`)
+
+When the symptom is *resource* shaped — RSS climbing, CPU pinned, requests hanging with
+nothing in the logs — `net/http/pprof` is mounted at `/debug/pprof/` behind the **same**
+`GATEWAY_LOGS_TOKEN` gate (`?token=` or Bearer, 404 when no token is configured) on
+**both** listeners, so every url and proxy trick above applies unchanged. Nothing to
+enable and no restart: a restart destroys the state that was worth profiling.
+
+```sh
+# heap — RSS growth; the log ring and the LRUs are the only intentional retainers
+curl -sS --proxytunnel -x "$HTTPS_PROXY" \
+  "http://<droplet-ip>:4080/debug/pprof/heap?token=$GATEWAY_LOGS_TOKEN" -o heap.pprof
+# goroutine dump — hung deliveries/fetches; plain text, no tooling needed
+curl -sS --proxytunnel -x "$HTTPS_PROXY" \
+  "http://<droplet-ip>:4080/debug/pprof/goroutine?token=$GATEWAY_LOGS_TOKEN&debug=1" -o goroutines.txt
+# CPU over 30s of real traffic (seconds= is bounded only by your client; the server
+# sets no write timeout)
+curl -sS --proxytunnel -x "$HTTPS_PROXY" \
+  "http://<droplet-ip>:4080/debug/pprof/profile?token=$GATEWAY_LOGS_TOKEN&seconds=30" -o cpu.pprof
+```
+
+Analyse offline — Go profiles carry their own symbols, so no matching binary is needed:
+`go tool pprof -http=: heap.pprof`. `go tool pprof "<url>?token=…"` fetches directly when
+egress allows it; through a CONNECT-only proxy it cannot, so curl to a file first.
+
+Traps:
+
+- **`block` and `mutex` are listed on the index but always empty** — the gateway never
+  calls `runtime.SetBlockProfileRate`/`SetMutexProfileFraction`. Read nothing into them;
+  they are not evidence of no contention.
+- The goroutine dump is the fast read for the bounded resources here: the `sem` channel
+  (`maxInflightDeliveries`), the per-user outbound pollers, and `singleflight`. A pile
+  parked in `postSigned` means peer inboxes are hanging — which `/logs` shows only as an
+  *absence* of warnings (see the trap in §2), so the dump is the only positive evidence.
+- Profiles describe the process, not one network: the mainnet and testnet nodes share it,
+  so there is no `&network=` equivalent — attribute by the symbols in the stack.
 
 ## 2. Read the logs
 
