@@ -1485,8 +1485,8 @@ func TestGetRepliesNativizesOwnStatuses(t *testing.T) {
 			writeJSON(w, "application/json", map[string]any{
 				"ancestors": []any{},
 				"descendants": []any{map[string]any{
-					"id":  "201",
-					"uri": self + "/users/01KTRAUSER/statuses/01KZH0TWEET?parent=x",
+					"id":      "201",
+					"uri":     self + "/users/01KTRAUSER/statuses/01KZH0TWEET?parent=x",
 					"content": "<p>from warpnet</p>", "created_at": "2024-01-01T00:00:00.000Z",
 					"in_reply_to_id": "100",
 					"account": map[string]any{
@@ -1737,7 +1737,54 @@ func TestLogsEndpoint(t *testing.T) {
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/alice", nil))
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("logsHandler /users code = %d, want 404 (only /logs is served)", rec.Code)
+		t.Errorf("logsHandler /users code = %d, want 404 (only the debug surface is served)", rec.Code)
+	}
+}
+
+// /debug/pprof carries the same gate as /logs: off without a token, 401 on a
+// wrong one, and served on both the public routes and the standalone listener.
+func TestPprofEndpoint(t *testing.T) {
+	g := testGateway(t)
+
+	g.logsToken = ""
+	rec := httptest.NewRecorder()
+	g.pprofHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/heap", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("no-token code = %d, want 404", rec.Code)
+	}
+
+	g.logsToken = "sekret"
+	rec = httptest.NewRecorder()
+	g.pprofHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/heap?token=nope", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-token code = %d, want 401", rec.Code)
+	}
+
+	// A named profile (served by pprof.Index) and the index itself must both work.
+	rec = httptest.NewRecorder()
+	g.pprofHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/goroutine?token=sekret&debug=1", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "goroutine profile") {
+		t.Fatalf("goroutine profile code=%d body=%.80q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	req.Header.Set("Authorization", "Bearer sekret")
+	g.pprofHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "heap") {
+		t.Fatalf("bearer index code=%d body=%.80q", rec.Code, rec.Body.String())
+	}
+
+	for _, h := range []http.Handler{g.routes(), g.logsHandler()} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/heap?token=sekret", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("mounted /debug/pprof/heap code = %d, want 200", rec.Code)
+		}
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/heap", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("mounted /debug/pprof/heap without a token = %d, want 401", rec.Code)
+		}
 	}
 }
 

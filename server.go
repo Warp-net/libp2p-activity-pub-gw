@@ -40,6 +40,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -81,6 +82,9 @@ const (
 	pathFollowers     = "/followers"
 	pathStatuses      = "/statuses/"
 	pathMedia         = "/media/"
+	// pathPprof is the Go runtime profiling subtree (net/http/pprof), gated by
+	// the same token as /logs.
+	pathPprof = "/debug/pprof/"
 	// replyParentQuery carries a reply note's parent url on its own status id, so
 	// serveStatus can hand the node the thread key it needs to resolve a reply
 	// (the node stores replies under their parent, not in the author's timeline).
@@ -196,6 +200,7 @@ func (g *gateway) routes() http.Handler {
 	mux.HandleFunc(pathMedia, g.handleMedia)
 	mux.HandleFunc(pathStatic, g.handleStatic)
 	mux.HandleFunc("/logs", g.handleLogs)
+	mux.Handle(pathPprof, g.pprofHandler())
 	if g.limits == nil {
 		g.limits = newRateLimiters()
 	}
@@ -224,24 +229,23 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 // logsHandler is the handler for the optional standalone /logs listener
-// (GATEWAY_LOGS_ADDR): it exposes only /logs, never the federation surface.
+// (GATEWAY_LOGS_ADDR): it exposes only the debug surface (/logs and
+// /debug/pprof), never the federation surface.
 func (g *gateway) logsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/logs", g.handleLogs)
+	mux.Handle(pathPprof, g.pprofHandler())
 	return mux
 }
 
-// handleLogs serves the in-memory log ring as text/plain. It is gated by
-// GATEWAY_LOGS_TOKEN (supplied as ?token= or a Bearer header): the endpoint is
-// disabled (404) unless a token is configured, so the Funnel-exposed gateway
-// never leaks its logs publicly by default.
-//
-// ?network=<name> reads one Warpnet network apart from the others: its own lines
-// plus the ones belonging to no network. Without it, every network is returned.
-func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request) {
-	if g.logsToken == "" || g.logs == nil {
+// authorizeDebug gates the operator surface (/logs, /debug/pprof) on
+// GATEWAY_LOGS_TOKEN, supplied as ?token= or a Bearer header: without a
+// configured token the surface is disabled (404), so the Funnel-exposed gateway
+// never leaks it publicly by default. It writes the response when it denies.
+func (g *gateway) authorizeDebug(w http.ResponseWriter, r *http.Request) bool {
+	if g.logsToken == "" {
 		http.NotFound(w, r)
-		return
+		return false
 	}
 	provided := r.URL.Query().Get("token")
 	if provided == "" {
@@ -250,6 +254,40 @@ func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(g.logsToken)) != 1 {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// pprofHandler serves the Go runtime profiles under /debug/pprof/ (heap,
+// goroutine, CPU profile, trace) behind the same token as /logs, so the running
+// gateway can be profiled without a debug build or a restart.
+func (g *gateway) pprofHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathPprof, pprof.Index) // also serves the named profiles
+	mux.HandleFunc(pathPprof+"cmdline", pprof.Cmdline)
+	mux.HandleFunc(pathPprof+"profile", pprof.Profile)
+	mux.HandleFunc(pathPprof+"symbol", pprof.Symbol)
+	mux.HandleFunc(pathPprof+"trace", pprof.Trace)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !g.authorizeDebug(w, r) {
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// handleLogs serves the in-memory log ring as text/plain, gated like the rest of
+// the debug surface (see authorizeDebug).
+//
+// ?network=<name> reads one Warpnet network apart from the others: its own lines
+// plus the ones belonging to no network. Without it, every network is returned.
+func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if g.logs == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !g.authorizeDebug(w, r) {
 		return
 	}
 	w.Header().Set(headerContentType, "text/plain; charset=utf-8")
