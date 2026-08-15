@@ -129,11 +129,6 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		routePostUnfollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), true)
 		}),
-		// A top-level owner post arrives here via follower gossip, so federate it
-		// to the author's Fediverse followers in real time (the poller is a
-		// slower backstop; delivery is idempotent by Create/Note id). Replies
-		// moved to routePostReply, but a node that predates the move still
-		// forwards them here, so keep serving them.
 		routePostTweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
 			if !ev.IsReply() {
 				if publishableTweet(ev, ev.UserId) {
@@ -145,15 +140,11 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			// UI renders it.
 			return ev, b.Reply(ctx, ev)
 		}),
-		// Warpnet forwards a reply to the parent author's node over its public
-		// reply route; when that author is a bridged Fediverse user, the node is
-		// this gateway. Federate it as an AP reply and echo back the tweet the
-		// node stored so the Warpnet UI renders it.
 		routePostReply: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
 			return ev, b.Reply(ctx, ev)
 		}),
-		// Older nodes forward a reply deletion to the parent author's node over
-		// the private delete route; federate it as an AP Delete. Only a reply (a
+		// Warpnet forwards a reply deletion to the parent author's node over the
+		// private delete route; federate it as an AP Delete. Only a reply (a
 		// parent set) targets a Mastodon note; anything else is acknowledged.
 		routeDeleteTweet: wrapJSON(func(ctx context.Context, ev deleteTweetEvent) (any, error) {
 			if ev.ParentId == "" && ev.RootId == "" {

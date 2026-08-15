@@ -132,10 +132,6 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 			}
 		}
 		pid, powner := parentID, owner
-		// A reply is a tweet carrying a parent, sent on warpnet's public reply
-		// route (the private tweet route it used to ride is now owner-only).
-		// parent_user_id is what routes the reply to the parent author's node
-		// and lets that node raise the reply notification.
 		return routePostReply, tweet{
 			CreatedAt:    time.Now(),
 			Id:           ingestedNoteID(obj),

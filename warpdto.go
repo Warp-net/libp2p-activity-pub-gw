@@ -54,24 +54,16 @@ const (
 	routePostUnfollow  = event.PUBLIC_POST_UNFOLLOW
 	// routePostReact/routePostUnreact are warpnet's reaction routes; they
 	// replaced the binary like/unlike ones. A reaction carries an emoji, and
-	// the heart (domain.DefaultReaction) is the one that maps to a Mastodon
+	// the heart (defaultReaction) is the one that maps to a Mastodon
 	// favourite — see mastodonBridge.React.
 	routePostReact     = event.PUBLIC_POST_REACT
 	routePostUnreact   = event.PUBLIC_POST_UNREACT
 	routePostRetweet   = event.PUBLIC_POST_RETWEET
 	routePostUnretweet = event.PUBLIC_POST_UNRETWEET
-	// routePostTweet is the route a node gossips a top-level owner tweet on.
-	// Creating a reply moved off it — see routePostReply.
-	routePostTweet = event.PRIVATE_POST_TWEET
-	// routePostReply is the route reply creation moved to. Warpnet now refuses
-	// every /private/ route from a peer that is neither the node's owner nor
-	// one of its paired devices, and the gateway is neither — so both
-	// directions ride this public route: warpnet forwards a reply to the
-	// parent author's node over it, and the gateway posts an inbound Fediverse
-	// reply to the parent author's node over it.
-	routePostReply = event.PUBLIC_POST_REPLY
-	// routeDeleteTweet is the route older nodes forward a reply deletion over
-	// to the parent author's node; current ones stopped propagating deletes.
+	routePostTweet     = event.PRIVATE_POST_TWEET
+	routePostReply     = event.PUBLIC_POST_REPLY
+	// routeDeleteTweet is the route warpnet forwards a reply deletion over to
+	// the parent author's node.
 	routeDeleteTweet = event.PRIVATE_DELETE_TWEET
 )
 
@@ -103,20 +95,11 @@ type (
 	getImageResponse   = event.GetImageResponse
 )
 
-// defaultReaction is the emoji a reaction carries when the client named none —
-// the one that maps onto a Mastodon favourite. maxReactionRunes caps a reaction
-// so an emoji can never blow up a database key on the node. Warpnet keeps both
-// unexported inside its reaction handler, so the gateway mirrors them here
-// rather than reaching into the node's package.
 const (
 	defaultReaction  = "❤️"
 	maxReactionRunes = 8
 )
 
-// normalizeReaction validates a reaction emoji arriving off the wire and
-// substitutes defaultReaction when the caller named none. Reactions become
-// database key segments on the node, so anything with a delimiter, whitespace
-// or a control character is rejected rather than silently coerced.
 func normalizeReaction(emoji string) (string, error) {
 	if emoji == "" {
 		return defaultReaction, nil
