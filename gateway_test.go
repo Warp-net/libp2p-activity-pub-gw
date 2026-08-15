@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/retrier"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	log "github.com/sirupsen/logrus"
@@ -770,7 +769,7 @@ func TestTranslateInbound(t *testing.T) {
 	// A Mastodon favourite is the default heart: warpnet stores reactions per
 	// emoji, so an empty one would read back as a bare like on an old client but
 	// leave the heart chip unpainted on a current one.
-	if react.Emoji != domain.DefaultReaction {
+	if react.Emoji != defaultReaction {
 		t.Fatalf("favourite emoji = %q, want the default heart", react.Emoji)
 	}
 	// A Fediverse actor is attributed by its "name@instance" handle — the id its
@@ -787,7 +786,7 @@ func TestTranslateInbound(t *testing.T) {
 			"content": "<p>hi there</p>", "inReplyTo": status,
 		},
 	})
-	if !ok || route != routePostTweet {
+	if !ok || route != routePostReply {
 		t.Fatalf("reply: route=%q ok=%v", route, ok)
 	}
 	reply := payload.(tweet)
@@ -815,7 +814,7 @@ func TestTranslateInbound(t *testing.T) {
 		"type": "Create", "actor": actor,
 		"object": map[string]any{"type": "Note", "content": "<p>RE: <a href=\"" + status + "\">" + status + "</a> nice post</p>"},
 	})
-	if !ok || route != routePostTweet {
+	if !ok || route != routePostReply {
 		t.Fatalf("RE reply: route=%q ok=%v", route, ok)
 	}
 	reply = payload.(tweet)
@@ -1686,7 +1685,7 @@ func TestGetTweetAndStatsUseMastodonREST(t *testing.T) {
 	// Every favourite reads back as the default heart, and the client paints its
 	// reaction chips from this breakdown — without it a favourited status shows
 	// no chip at all despite the non-zero count.
-	if stats.Reactions[domain.DefaultReaction] != 5 {
+	if stats.Reactions[defaultReaction] != 5 {
 		t.Errorf("stats.Reactions = %v, want 5 hearts", stats.Reactions)
 	}
 }
@@ -2050,7 +2049,7 @@ func TestSelfLoopRefused(t *testing.T) {
 			t.Errorf("postSigned: err = %v, want errSelfTarget", err)
 		}
 		// A status of ours is not a Mastodon note either (Like/Reply/Delete).
-		if _, err := b.React(ctx, "alice", g.actorID("alice")+pathStatuses+"1", domain.DefaultReaction, false); !errors.Is(err, errSelfTarget) {
+		if _, err := b.React(ctx, "alice", g.actorID("alice")+pathStatuses+"1", defaultReaction, false); !errors.Is(err, errSelfTarget) {
 			t.Errorf("React: err = %v, want errSelfTarget", err)
 		}
 	})

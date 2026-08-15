@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/Warp-net/libp2p-camouflage-transport v0.0.3
-	github.com/Warp-net/warpnet v1.0.1-0.20260803165249-a282d7d1c031
+	github.com/Warp-net/warpnet v1.0.1-0.20260815213844-83b17d53a5f6
 	github.com/filinvadim/ratelimiter v0.0.0-20250304112346-2ef3a2bd6f00
 	github.com/google/uuid v1.6.0
 	github.com/grokify/html-strip-tags-go v0.1.0

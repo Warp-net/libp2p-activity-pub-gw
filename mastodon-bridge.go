@@ -822,7 +822,7 @@ func tweetStats(noteURL string, favourites, boosts, replies uint64) event.TweetS
 		RepliesCount:   replies,
 	}
 	if favourites > 0 {
-		resp.Reactions = map[string]uint64{domain.DefaultReaction: favourites}
+		resp.Reactions = map[string]uint64{defaultReaction: favourites}
 	}
 	return resp
 }
@@ -918,14 +918,14 @@ func (b *mastodonBridge) GetImage(ctx context.Context, rawURL string) (getImageR
 
 // React federates a Warpnet reaction (or its undo) as an AP Like — a Mastodon
 // favourite — and returns the status's favourite count. emoji must already be
-// normalized (see domain.NormalizeReaction); an undo names none.
+// normalized (see normalizeReaction); an undo names none.
 //
 // Mastodon has one reaction, the favourite, so only the default heart maps onto
 // it; emoji reactions are a Pleroma/Misskey extension the Mastodon inbox would
 // reject. Any other emoji is therefore accepted and dropped rather than
 // federated as a favourite the reactor did not intend.
 func (b *mastodonBridge) React(ctx context.Context, localUser, objectURL, emoji string, undo bool) (uint64, error) {
-	if !undo && emoji != domain.DefaultReaction {
+	if !undo && emoji != defaultReaction {
 		return 0, nil
 	}
 	note, inbox, err := b.authorInbox(ctx, objectURL)

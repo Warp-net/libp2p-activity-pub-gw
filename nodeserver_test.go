@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
@@ -287,7 +286,7 @@ func TestNodeServerReadRoutes(t *testing.T) {
 		if stats.ReactionsCount != 4 || stats.RetweetsCount != 1 || stats.RepliesCount != 2 {
 			t.Fatalf("stats = %+v", stats)
 		}
-		if stats.Reactions[domain.DefaultReaction] != 4 {
+		if stats.Reactions[defaultReaction] != 4 {
 			t.Fatalf("stats.Reactions = %v, want the favourites as hearts", stats.Reactions)
 		}
 	})
@@ -356,12 +355,12 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	t.Run("react and unreact", func(t *testing.T) {
 		var resp event.ReactionsCountResponse
 		fx.call(t, routePostReact, reactionEvent{
-			OwnerId: "alice", TweetId: noteURL, Emoji: domain.DefaultReaction,
+			OwnerId: "alice", TweetId: noteURL, Emoji: defaultReaction,
 		}, &resp)
 		if resp.Count != 4 {
 			t.Fatalf("count = %d", resp.Count)
 		}
-		if resp.Reactions[domain.DefaultReaction] != 4 {
+		if resp.Reactions[defaultReaction] != 4 {
 			t.Fatalf("reactions = %v, want the count attributed to the heart", resp.Reactions)
 		}
 		fx.call(t, routePostUnreact, reactionEvent{OwnerId: "alice", TweetId: noteURL}, &resp)
@@ -384,7 +383,7 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 		if resp.Count != 4 {
 			t.Fatalf("count = %d, want the favourite counted", resp.Count)
 		}
-		if resp.Reactions[domain.DefaultReaction] != 4 {
+		if resp.Reactions[defaultReaction] != 4 {
 			t.Fatalf("reactions = %v, want the count under the default heart", resp.Reactions)
 		}
 		got := f.delivered()[before:]
@@ -434,19 +433,37 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 		}
 	})
 
-	// Warpnet forwards a reply over the private tweet route — a reply is a tweet
-	// carrying a parent, and the standalone reply route is gone. A top-level post
-	// arrives here through follower gossip and is federated in real time.
-	t.Run("private tweet route: a reply federates as a reply", func(t *testing.T) {
+	// Warpnet forwards a reply over the public reply route — a reply is a tweet
+	// carrying a parent. A top-level post arrives on the tweet route through
+	// follower gossip and is federated in real time.
+	t.Run("public reply route: a reply federates as a reply", func(t *testing.T) {
 		before := len(f.delivered())
 		parent := noteURL
 		var echoed tweet
-		fx.call(t, routePostTweet, tweet{
+		fx.call(t, routePostReply, tweet{
 			Id: "r2", ParentId: &parent, RootId: noteURL, UserId: "alice",
 			Text: "threaded", CreatedAt: time.Unix(0, 0),
 		}, &echoed)
 		// The reply is echoed back as the stored tweet so the Warpnet UI renders it.
 		if echoed.Id != "r2" || echoed.ParentId == nil || *echoed.ParentId != noteURL {
+			t.Fatalf("echo = %+v", echoed)
+		}
+		got := f.delivered()[before:]
+		if len(got) != 1 || got[0].doc["type"] != typeCreate {
+			t.Fatalf("delivered = %+v", got)
+		}
+	})
+
+	// A node that predates the move still forwards replies over the tweet route.
+	t.Run("private tweet route: a reply still federates as a reply", func(t *testing.T) {
+		before := len(f.delivered())
+		parent := noteURL
+		var echoed tweet
+		fx.call(t, routePostTweet, tweet{
+			Id: "r3", ParentId: &parent, RootId: noteURL, UserId: "alice",
+			Text: "legacy threaded", CreatedAt: time.Unix(0, 0),
+		}, &echoed)
+		if echoed.Id != "r3" {
 			t.Fatalf("echo = %+v", echoed)
 		}
 		got := f.delivered()[before:]
@@ -553,15 +570,15 @@ func TestWrapJSON(t *testing.T) {
 // so the client can repaint its chips without a second round-trip. An unreact
 // names no emoji, so only the total travels.
 func TestReactionsCount(t *testing.T) {
-	got := reactionsCount(domain.DefaultReaction, 3)
-	if got.Count != 3 || got.Reactions[domain.DefaultReaction] != 3 {
+	got := reactionsCount(defaultReaction, 3)
+	if got.Count != 3 || got.Reactions[defaultReaction] != 3 {
 		t.Fatalf("react = %+v", got)
 	}
 	if got := reactionsCount("", 2); got.Count != 2 || got.Reactions != nil {
 		t.Fatalf("unreact = %+v, want the total only", got)
 	}
 	// A zero tally must not claim an emoji with no reactions behind it.
-	if got := reactionsCount(domain.DefaultReaction, 0); got.Reactions != nil {
+	if got := reactionsCount(defaultReaction, 0); got.Reactions != nil {
 		t.Fatalf("zero = %+v, want no breakdown", got)
 	}
 }

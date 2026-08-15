@@ -14,8 +14,12 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/Warp-net/libp2p-camouflage-transport v0.0.3 h1:rmkVl3+zHQqduXIAf6KEhM/4Y1eb1lXiIkHt4j7YgBY=
 github.com/Warp-net/libp2p-camouflage-transport v0.0.3/go.mod h1:Ki1TfLYtJgF4vxRYfZwfk8m4FJOVxP8eVmr6VemVkpQ=
-github.com/Warp-net/warpnet v1.0.1-0.20260803165249-a282d7d1c031 h1:agJ95zw360E35B6joafKjejsLTUC+E+PRjObEru3oxc=
-github.com/Warp-net/warpnet v1.0.1-0.20260803165249-a282d7d1c031/go.mod h1:LKffNHtkbQVfT3odQfQbUiCOl2ONzvFngjqYdzeBknA=
+github.com/Warp-net/warpnet v1.0.1-0.20260815213102-f6bd80b88dc4 h1:XU7FNUz7s+S8BG1lmetFf4PKckjUHqct2KHSdEko55Q=
+github.com/Warp-net/warpnet v1.0.1-0.20260815213102-f6bd80b88dc4/go.mod h1:LKffNHtkbQVfT3odQfQbUiCOl2ONzvFngjqYdzeBknA=
+github.com/Warp-net/warpnet v1.0.1-0.20260815213844-83b17d53a5f6 h1:0lUAWo6pN0ithMvx/uF75vxL2m6DXreaAutEX9W5JRI=
+github.com/Warp-net/warpnet v1.0.1-0.20260815213844-83b17d53a5f6/go.mod h1:LKffNHtkbQVfT3odQfQbUiCOl2ONzvFngjqYdzeBknA=
+github.com/Warp-net/warpnet v1.0.1-0.20260815214805-64c51b80095b h1:r4PS4coNasznVpnHLUtKh84JVDrXO3J8BZKmP3um8ag=
+github.com/Warp-net/warpnet v1.0.1-0.20260815214805-64c51b80095b/go.mod h1:LKffNHtkbQVfT3odQfQbUiCOl2ONzvFngjqYdzeBknA=
 github.com/akutz/memconn v0.1.0 h1:NawI0TORU4hcOMsMr11g7vwlCdkYeLKXBcxWu2W/P8A=
 github.com/akutz/memconn v0.1.0/go.mod h1:Jo8rI7m0NieZyLI5e2CDlRdRqRRB4S7Xp77ukDjH+Fw=
 github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa h1:LHTHcTQiSGT7VVbI0o4wBRNQIgn917usHWOd6VAffYI=
