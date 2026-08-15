@@ -597,7 +597,7 @@ func TestGetTweetStatsFallsBackToAPCollections(t *testing.T) {
 	}
 	// The AP likes collection is the favourite count, which reads back as the
 	// default heart in the per-emoji breakdown the client paints chips from.
-	if got.Reactions[domain.DefaultReaction] != 4 {
+	if got.Reactions[defaultReaction] != 4 {
 		t.Fatalf("stats.Reactions = %v, want 4 hearts", got.Reactions)
 	}
 	if string(got.TweetId) != noteURL {
@@ -875,7 +875,7 @@ func TestReactFederatesTheHeartAndAdjustsTheCount(t *testing.T) {
 		"likes": map[string]any{"totalItems": float64(3)},
 	})
 
-	count, err := b.React(context.Background(), "alice", f.url("/notes/1"), domain.DefaultReaction, false)
+	count, err := b.React(context.Background(), "alice", f.url("/notes/1"), defaultReaction, false)
 	if err != nil {
 		t.Fatalf("React: %v", err)
 	}
@@ -939,7 +939,7 @@ func TestReactFederatesTheHeartAndAdjustsTheCount(t *testing.T) {
 	})
 
 	t.Run("an unreachable note is an error", func(t *testing.T) {
-		if _, err := b.React(context.Background(), "alice", f.url("/notes/ghost"), domain.DefaultReaction, false); err == nil {
+		if _, err := b.React(context.Background(), "alice", f.url("/notes/ghost"), defaultReaction, false); err == nil {
 			t.Fatal("expected an error")
 		}
 	})

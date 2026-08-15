@@ -32,8 +32,6 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	"github.com/Warp-net/warpnet/domain"
 )
 
 const (
@@ -71,7 +69,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 		// Fediverse side can express.
 		return routePostReact, reactionEvent{
 			TweetId: tweetID, UserId: owner, OwnerId: bridgedUserID(actor),
-			Emoji: domain.DefaultReaction,
+			Emoji: defaultReaction,
 		}, owner, true
 
 	case typeAnnounce:
@@ -134,10 +132,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 			}
 		}
 		pid, powner := parentID, owner
-		// Warpnet consolidated replies into the tweet path: a reply is a tweet
-		// carrying a parent, sent on the private tweet route. parent_user_id
-		// lets the owner's node raise the reply notification.
-		return routePostTweet, tweet{
+		return routePostReply, tweet{
 			CreatedAt:    time.Now(),
 			Id:           ingestedNoteID(obj),
 			ParentId:     &pid,

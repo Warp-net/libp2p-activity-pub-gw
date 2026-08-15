@@ -33,6 +33,10 @@ package main
 // a string alias, so these are byte-for-byte the shapes the node speaks.
 
 import (
+	"errors"
+	"unicode"
+	"unicode/utf8"
+
 	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
 )
@@ -50,16 +54,14 @@ const (
 	routePostUnfollow  = event.PUBLIC_POST_UNFOLLOW
 	// routePostReact/routePostUnreact are warpnet's reaction routes; they
 	// replaced the binary like/unlike ones. A reaction carries an emoji, and
-	// the heart (domain.DefaultReaction) is the one that maps to a Mastodon
+	// the heart (defaultReaction) is the one that maps to a Mastodon
 	// favourite — see mastodonBridge.React.
 	routePostReact     = event.PUBLIC_POST_REACT
 	routePostUnreact   = event.PUBLIC_POST_UNREACT
 	routePostRetweet   = event.PUBLIC_POST_RETWEET
 	routePostUnretweet = event.PUBLIC_POST_UNRETWEET
-	// routePostTweet is the route warpnet forwards replies over after it
-	// consolidated replies into the tweet path (a reply is a tweet with a
-	// parent); it superseded the standalone reply route.
-	routePostTweet = event.PRIVATE_POST_TWEET
+	routePostTweet     = event.PRIVATE_POST_TWEET
+	routePostReply     = event.PUBLIC_POST_REPLY
 	// routeDeleteTweet is the route warpnet forwards a reply deletion over to
 	// the parent author's node.
 	routeDeleteTweet = event.PRIVATE_DELETE_TWEET
@@ -92,3 +94,26 @@ type (
 	getImageEvent      = event.GetImageEvent
 	getImageResponse   = event.GetImageResponse
 )
+
+const (
+	defaultReaction  = "❤️"
+	maxReactionRunes = 8
+)
+
+func normalizeReaction(emoji string) (string, error) {
+	if emoji == "" {
+		return defaultReaction, nil
+	}
+	if !utf8.ValidString(emoji) {
+		return "", errors.New("reaction: not a valid utf-8 string")
+	}
+	if utf8.RuneCountInString(emoji) > maxReactionRunes {
+		return "", errors.New("reaction: too long")
+	}
+	for _, r := range emoji {
+		if r == '/' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", errors.New("reaction: forbidden character")
+		}
+	}
+	return emoji, nil
+}

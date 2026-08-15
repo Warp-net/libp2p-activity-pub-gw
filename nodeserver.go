@@ -42,7 +42,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/Warp-net/warpnet/core/warpnet"
-	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
@@ -111,7 +110,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		// whatever the client sent, and a client that predates reactions sends
 		// none — which means the default heart, i.e. a favourite.
 		routePostReact: wrapJSON(func(ctx context.Context, ev reactionEvent) (any, error) {
-			emoji, err := domain.NormalizeReaction(ev.Emoji)
+			emoji, err := normalizeReaction(ev.Emoji)
 			if err != nil {
 				return nil, err
 			}
@@ -130,12 +129,6 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		routePostUnfollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), true)
 		}),
-		// Warpnet consolidated replies into the tweet path: a reply is a tweet
-		// with a parent, forwarded to the parent author's node over the private
-		// tweet route (the standalone reply route is gone). Federate replies as
-		// AP replies; a top-level owner post arrives here via follower gossip, so
-		// federate it to the author's Fediverse followers in real time (the poller
-		// is a slower backstop; delivery is idempotent by Create/Note id).
 		routePostTweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
 			if !ev.IsReply() {
 				if publishableTweet(ev, ev.UserId) {
@@ -145,6 +138,9 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			}
 			// Echo the reply back as the tweet the node stored, so the Warpnet
 			// UI renders it.
+			return ev, b.Reply(ctx, ev)
+		}),
+		routePostReply: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
 			return ev, b.Reply(ctx, ev)
 		}),
 		// Warpnet forwards a reply deletion to the parent author's node over the
