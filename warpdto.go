@@ -61,7 +61,11 @@ const (
 	routePostRetweet   = event.PUBLIC_POST_RETWEET
 	routePostUnretweet = event.PUBLIC_POST_UNRETWEET
 	routePostTweet     = event.PRIVATE_POST_TWEET
-	routePostReply     = event.PUBLIC_POST_REPLY
+	// routePostTimeline is warpnet's follower-delivery route: a followed
+	// author's new tweet arrives here (PRIVATE_POST_TWEET now strictly means
+	// "the owner composes"; the gateway is the Fediverse followers' node).
+	routePostTimeline = event.PUBLIC_POST_TIMELINE
+	routePostReply    = event.PUBLIC_POST_REPLY
 	// routeDeleteTweet is the route warpnet forwards a reply deletion over to
 	// the parent author's node.
 	routeDeleteTweet = event.PRIVATE_DELETE_TWEET

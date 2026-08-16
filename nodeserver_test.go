@@ -495,6 +495,47 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 		}
 	})
 
+	// Warpnet delivers a followed author's new tweet over the public timeline
+	// route now; the gateway federates it the same way.
+	t.Run("timeline route: a top-level post is echoed and federated", func(t *testing.T) {
+		if err := fx.g.followers.Add("alice", fx.actor); err != nil {
+			t.Fatal(err)
+		}
+		before := len(f.delivered())
+		var echoed tweet
+		fx.call(t, routePostTimeline, tweet{
+			Id: "t2", UserId: "alice", Text: "delivered to timeline", CreatedAt: time.Unix(0, 0),
+		}, &echoed)
+		if echoed.Id != "t2" {
+			t.Fatalf("echo = %+v", echoed)
+		}
+		waitFor(t, "the delivered post to federate", func() bool { return len(f.delivered()) > before })
+		got := f.delivered()[before]
+		if got.doc["type"] != typeCreate {
+			t.Fatalf("delivered = %+v", got.doc)
+		}
+		n, _ := got.doc["object"].(map[string]any)
+		if n == nil || n["id"] != fx.g.actorID("alice")+pathStatuses+"t2" {
+			t.Fatalf("note = %+v", n)
+		}
+	})
+
+	t.Run("timeline route: a reply is acknowledged but not federated", func(t *testing.T) {
+		before := len(f.delivered())
+		parent := noteURL
+		var echoed tweet
+		fx.call(t, routePostTimeline, tweet{
+			Id: "r4", ParentId: &parent, RootId: noteURL, UserId: "alice",
+			Text: "reply via timeline", CreatedAt: time.Unix(0, 0),
+		}, &echoed)
+		if echoed.Id != "r4" {
+			t.Fatalf("echo = %+v", echoed)
+		}
+		if got := f.delivered()[before:]; len(got) != 0 {
+			t.Fatalf("a reply must not federate from the timeline route, delivered = %+v", got)
+		}
+	})
+
 	t.Run("retweet and unretweet", func(t *testing.T) {
 		before := len(f.delivered())
 		by := "alice"
