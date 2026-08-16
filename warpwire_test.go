@@ -14,22 +14,23 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-// signingEnvelope frames a body/timestamp the way the wire does, so a test can
-// ask what bytes the signature covers.
-func signingEnvelope(body []byte, ts time.Time) message {
-	return message{Body: wjson.RawMessage(body), Timestamp: ts}
+// signingEnvelope frames a body/timestamp/route the way the wire does, so a
+// test can ask what bytes the signature covers.
+func signingEnvelope(body []byte, ts time.Time, route string) message {
+	return message{Body: wjson.RawMessage(body), Timestamp: ts, Destination: route}
 }
 
-// The gateway signs with warpnet's own Message.SigningBytes: the raw body
-// followed by the timestamp as decimal Unix nanoseconds. Pinned here because a
-// warpnet bump that changed the framing would silently get every envelope the
-// gateway sends rejected by the node — and every one it receives dropped.
+// The gateway signs with warpnet's own Message.SigningBytes: the raw body,
+// the timestamp as decimal Unix nanoseconds, then the destination route.
+// Pinned here because a warpnet bump that changed the framing would silently
+// get every envelope the gateway sends rejected by the node — and every one
+// it receives dropped.
 func TestSigningBytesFraming(t *testing.T) {
 	ts := time.Unix(0, 1700000000123456789)
-	if got := string(signingEnvelope([]byte("body"), ts).SigningBytes()); got != "body1700000000123456789" {
+	if got := string(signingEnvelope([]byte("body"), ts, "/route").SigningBytes()); got != "body1700000000123456789/route" {
 		t.Fatalf("SigningBytes = %q", got)
 	}
-	if got := string(signingEnvelope(nil, ts).SigningBytes()); got != "1700000000123456789" {
+	if got := string(signingEnvelope(nil, ts, "").SigningBytes()); got != "1700000000123456789" {
 		t.Fatalf("empty body = %q", got)
 	}
 }
@@ -43,20 +44,24 @@ func TestStreamSignatureVerifiesAgainstThePeerKey(t *testing.T) {
 	}
 	body := []byte(`{"user_id":"alice"}`)
 	ts := time.Now()
-	sig := security.Sign(priv, signingEnvelope(body, ts).SigningBytes())
+	const route = "/public/get/user/0.0.0"
+	sig := security.Sign(priv, signingEnvelope(body, ts, route).SigningBytes())
 	pub, ok := ed25519.PrivateKey(priv).Public().(ed25519.PublicKey)
 	if !ok {
 		t.Fatal("not an ed25519 key")
 	}
 
-	if verr := security.VerifySignature(pub, signingEnvelope(body, ts).SigningBytes(), sig); verr != nil {
+	if verr := security.VerifySignature(pub, signingEnvelope(body, ts, route).SigningBytes(), sig); verr != nil {
 		t.Fatalf("verify: %v", verr)
 	}
-	if verr := security.VerifySignature(pub, signingEnvelope([]byte("tampered"), ts).SigningBytes(), sig); verr == nil {
+	if verr := security.VerifySignature(pub, signingEnvelope([]byte("tampered"), ts, route).SigningBytes(), sig); verr == nil {
 		t.Fatal("a tampered body must not verify")
 	}
-	if verr := security.VerifySignature(pub, signingEnvelope(body, ts.Add(time.Second)).SigningBytes(), sig); verr == nil {
+	if verr := security.VerifySignature(pub, signingEnvelope(body, ts.Add(time.Second), route).SigningBytes(), sig); verr == nil {
 		t.Fatal("a replaced timestamp must not verify")
+	}
+	if verr := security.VerifySignature(pub, signingEnvelope(body, ts, "/private/post/block/0.0.0").SigningBytes(), sig); verr == nil {
+		t.Fatal("a repointed route must not verify")
 	}
 }
 

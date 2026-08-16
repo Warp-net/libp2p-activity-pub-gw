@@ -143,6 +143,16 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		routePostReply: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
 			return ev, b.Reply(ctx, ev)
 		}),
+		// A followed author's new tweet, delivered to this node as their
+		// followers' node. Replies live in their thread, not the timeline, so
+		// only a top-level post federates; everything is acknowledged so the
+		// sender doesn't retry.
+		routePostTimeline: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
+			if !ev.IsReply() && publishableTweet(ev, ev.UserId) {
+				g.federateTweetAsync(ev)
+			}
+			return ev, nil
+		}),
 		// Warpnet forwards a reply deletion to the parent author's node over the
 		// private delete route; federate it as an AP Delete. Only a reply (a
 		// parent set) targets a Mastodon note; anything else is acknowledged.
