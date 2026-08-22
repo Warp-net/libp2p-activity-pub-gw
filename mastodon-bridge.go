@@ -632,11 +632,23 @@ func restBaseTweet(host string, s map[string]any) (tweet, bool) {
 		}
 	}
 	if q := asMap(s["quote"]); q != nil {
-		if qu := asString(q["uri"]); qu != "" {
+		// Mastodon nests the quoted status under quoted_status and keeps only the
+		// acceptance state on the quote itself; other servers inline the status.
+		qs := asMap(q["quoted_status"])
+		if qs == nil {
+			qs = q
+		}
+		if qu := asString(qs["uri"]); qu != "" {
 			t.QuotedTweetId = &qu
-			if qh := acctHandle(host, asString(asMap(q["account"])["acct"])); qh != "" {
+			if qh := acctHandle(host, asString(asMap(qs["account"])["acct"])); qh != "" {
 				t.QuotedUserId = &qh
 			}
+		}
+		// Drop the "RE: <url>" fallback Mastodon inlines into a quote's content:
+		// left in, it renders as a bare link line that reads like a stray reply
+		// sitting in the timeline. Mirrors noteToTweet on the ActivityPub path.
+		if comment, stripped := stripQuoteFallback(t.Text); stripped && comment != "" {
+			t.Text = comment
 		}
 	}
 	if t.CreatedAt.IsZero() {

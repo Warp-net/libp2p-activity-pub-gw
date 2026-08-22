@@ -116,9 +116,13 @@ func TestUndoIf(t *testing.T) {
 }
 
 func TestRestBaseTweet(t *testing.T) {
+	// The quote shape is Mastodon's real one: the quoted status is nested under
+	// quote.quoted_status, and the content opens with an inline "RE: <url>"
+	// fallback that must not survive into the tweet text.
 	t.Run("maps a status with media and a quote", func(t *testing.T) {
 		got, ok := restBaseTweet("m.example", map[string]any{
-			"uri": "https://m.example/users/bob/statuses/1", "content": "<p>hi</p>",
+			"uri":        "https://m.example/users/bob/statuses/1",
+			"content":    `<p class="quote-inline">RE: <a href="https://o.example/@ann/9">https://o.example/@ann/9</a></p><p>hi</p>`,
 			"created_at": "2024-01-01T00:00:00.000Z",
 			"account":    map[string]any{"acct": "bob"},
 			"media_attachments": []any{
@@ -126,8 +130,11 @@ func TestRestBaseTweet(t *testing.T) {
 				map[string]any{"type": "video", "url": "https://m.example/a.mp4"},
 			},
 			"quote": map[string]any{
-				"uri":     "https://o.example/users/ann/statuses/9",
-				"account": map[string]any{"acct": "ann@o.example"},
+				"state": "accepted",
+				"quoted_status": map[string]any{
+					"uri":     "https://o.example/users/ann/statuses/9",
+					"account": map[string]any{"acct": "ann@o.example"},
+				},
 			},
 		})
 		if !ok {
@@ -141,6 +148,29 @@ func TestRestBaseTweet(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got.ImageKeys, []string{"https://m.example/a.png"}) {
 			t.Fatalf("images = %v, want only the image attachment", got.ImageKeys)
+		}
+		if got.QuotedTweetId == nil || *got.QuotedTweetId != "https://o.example/users/ann/statuses/9" {
+			t.Fatalf("quote = %v", got.QuotedTweetId)
+		}
+		if got.QuotedUserId == nil || *got.QuotedUserId != "ann@o.example" {
+			t.Fatalf("quoted author = %v", got.QuotedUserId)
+		}
+		if got.ParentId != nil {
+			t.Fatalf("a quote is top-level, not a reply: parent = %v", got.ParentId)
+		}
+	})
+
+	t.Run("tolerates a quote with the status inlined", func(t *testing.T) {
+		got, ok := restBaseTweet("m.example", map[string]any{
+			"uri": "https://m.example/users/bob/statuses/1", "content": "<p>hi</p>",
+			"account": map[string]any{"acct": "bob"},
+			"quote": map[string]any{
+				"uri":     "https://o.example/users/ann/statuses/9",
+				"account": map[string]any{"acct": "ann@o.example"},
+			},
+		})
+		if !ok {
+			t.Fatal("not ok")
 		}
 		if got.QuotedTweetId == nil || *got.QuotedTweetId != "https://o.example/users/ann/statuses/9" {
 			t.Fatalf("quote = %v", got.QuotedTweetId)
