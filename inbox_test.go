@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // inboxFixture wires a gateway to an in-process peer instance whose actor "bob"
@@ -324,6 +326,54 @@ func TestHandleInboxForwardsTranslatedActivities(t *testing.T) {
 			t.Fatalf("status = %d", w.Code)
 		}
 	})
+}
+
+// A node handler rejection (the rate limiter's code 5001, or the authorship
+// check on every public POST route) streams back as an ordinary response body,
+// so an unchecked forward books a dropped activity as delivered. The peer still
+// gets its 202 — the failure is ours to log, and it must actually be logged.
+func TestHandleInboxLogsNodeSideRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"rate limited", `{"code":5001,"message":"rate limited"}`, "rate limited"},
+		{
+			"foreign author",
+			`{"code":0,"message":"event did not come from its author's node"}`,
+			"did not come from its author's node",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newInboxFixture(t)
+			fx.g.req = rawRequester{body: []byte(tc.body)}
+
+			ring := newLogRing(64)
+			log.AddHook(ring)
+			defer func() {
+				log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+			}()
+
+			req := fx.post(t, map[string]any{
+				"type": typeLike, "actor": fx.actor,
+				"object": "https://gw.example/users/alice/statuses/t1",
+			})
+			w := httptest.NewRecorder()
+			fx.g.handleInbox(w, req, "")
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202 regardless of the node's answer", w.Code)
+			}
+			waitFor(t, "the rejection to be logged", func() bool {
+				for _, l := range ring.lines("") {
+					if strings.Contains(l, "inbox: forward") && strings.Contains(l, tc.want) {
+						return true
+					}
+				}
+				return false
+			})
+		})
+	}
 }
 
 // The full wire path: a signed delivery over real HTTP through the route table,
