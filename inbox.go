@@ -135,7 +135,14 @@ func (g *gateway) handleInboundActivity(w http.ResponseWriter, typ string, raw m
 	case g.sem <- struct{}{}:
 		go func() {
 			defer func() { <-g.sem }()
-			if _, err := g.requestForUser(localUser, route, payload); err != nil {
+			bt, err := g.requestForUser(localUser, route, payload)
+			if err == nil {
+				// A node handler rejection (rate limit, authorship) streams
+				// back as an ordinary response, so a nil error alone would
+				// book a dropped activity as delivered.
+				err = nodeResponseError(bt)
+			}
+			if err != nil {
 				log.Errorf("inbox: forward %s -> %s: %v", typ, route, err)
 			}
 		}()
