@@ -34,7 +34,7 @@ func TestTryMembersHedgesPastDeadPeer(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	bt, err := c.tryMembers(ctx, []peer.ID{dead, good}, "/route", nil)
+	bt, err := c.tryMembers(ctx, []peer.ID{dead, good}, routeGetUser, nil)
 	elapsed := time.Since(start)
 
 	if err != nil {

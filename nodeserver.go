@@ -54,7 +54,7 @@ const (
 	// e.g. an image, is not capped here).
 	maxRequestBytes = 1 << 20
 	// apRequestTimeout bounds the ActivityPub work to answer one node request.
-	apRequestTimeout = 30 * time.Second
+	apRequestTimeout = 90 * time.Second
 )
 
 // routeHandler answers one public route from the signed request body.
