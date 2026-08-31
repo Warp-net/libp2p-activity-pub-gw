@@ -378,8 +378,6 @@ func TestRequestRefreshesAnEmptyRoutingTable(t *testing.T) {
 	}
 }
 
-// rateLimitedBody is what a node answers with when its per-route/peer bucket is
-// empty: an ordinary response body, not a transport error.
 func rateLimitedBody(t *testing.T) []byte {
 	t.Helper()
 	bt, err := json.Marshal(event.ResponseError{
@@ -391,9 +389,6 @@ func rateLimitedBody(t *testing.T) []byte {
 	return bt
 }
 
-// A rate-limited node answers instantly, so it always wins a hedged race. If
-// that counted as success the gateway would remember it and pin every later
-// request to the one node refusing them.
 func TestTryMembersSkipsARateLimitedMember(t *testing.T) {
 	limited, member := peer.ID("limited-node"), peer.ID("member-1")
 
@@ -428,8 +423,6 @@ func TestTryMembersSkipsARateLimitedMember(t *testing.T) {
 	}
 }
 
-// Every candidate refusing must surface as an error, not as the refusal body
-// handed back to the caller as if it were data.
 func TestTryMembersAllRateLimited(t *testing.T) {
 	c, _ := stubbedClient(t, func(peer.ID, string, any) ([]byte, error) {
 		return rateLimitedBody(t), nil
@@ -443,8 +436,6 @@ func TestTryMembersAllRateLimited(t *testing.T) {
 	}
 }
 
-// Hedging a write would deliver the same activity to several members at once
-// and spend the tightest rate-limit bucket there is.
 func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
@@ -471,7 +462,7 @@ func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
 		_, _ = c.tryMembers(ctx, []peer.ID{"a", "b", "c"}, routePostFollow, nil)
 	}()
 
-	time.Sleep(3 * hedgeDelay) // long enough for a hedge to have fired
+	time.Sleep(3 * hedgeDelay)
 	mu.Lock()
 	launched := inFlight
 	mu.Unlock()
@@ -494,8 +485,6 @@ func TestDemoteThrottledMovesCoolingMembersLast(t *testing.T) {
 	}
 }
 
-// A profile read is the gateway's hottest node call; a Mastodon instance asks
-// for the same handle several times while discovering an account.
 func TestLookupUserCachesTheProfile(t *testing.T) {
 	var calls int
 	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
@@ -518,7 +507,6 @@ func TestLookupUserCachesTheProfile(t *testing.T) {
 	}
 }
 
-// A miss must not be cached: another joined network may serve the handle.
 func TestLookupUserDoesNotCacheAMiss(t *testing.T) {
 	var calls int
 	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {

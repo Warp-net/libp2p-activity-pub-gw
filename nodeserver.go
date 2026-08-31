@@ -54,9 +54,6 @@ const (
 	// e.g. an image, is not capped here).
 	maxRequestBytes = 1 << 20
 	// apRequestTimeout bounds the ActivityPub work to answer one node request.
-	// The caller waits out warpnet's responseReadTimeout (2 minutes) before it
-	// gives up, so a shorter budget here only turns a slow thread render into a
-	// failure the node could have waited for.
 	apRequestTimeout = 90 * time.Second
 )
 

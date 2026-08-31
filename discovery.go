@@ -38,8 +38,7 @@ const maxMemberCandidates = 64
 
 // memberCandidates lists peers that may serve the /public/... routes: members
 // known to have answered before (first), then the DHT routing-table peers
-// (Warpnet member/moderator nodes are DHT servers). The relays are excluded,
-// and a member still cooling down from a rate limit on this route is demoted.
+// (Warpnet member/moderator nodes are DHT servers). The relays are excluded.
 func (c *nodeClient) memberCandidates(route string) []peer.ID {
 	seen := make(map[peer.ID]struct{})
 	out := make([]peer.ID, 0, maxMemberCandidates)
@@ -74,9 +73,6 @@ func (c *nodeClient) memberCandidates(route string) []peer.ID {
 	return c.demoteThrottled(route, out)
 }
 
-// demoteThrottled moves members that recently answered "too many requests" on
-// this route to the back. They are kept, not dropped: a throttled node may be
-// the only one holding the data, and it is still better than no answer at all.
 func (c *nodeClient) demoteThrottled(route string, peers []peer.ID) []peer.ID {
 	if c.throttled == nil || c.throttled.Len() == 0 {
 		return peers
