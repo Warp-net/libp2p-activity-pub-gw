@@ -34,7 +34,7 @@ func TestTryMembersHedgesPastDeadPeer(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	bt, err := c.tryMembers(ctx, []peer.ID{dead, good}, "/route", nil)
+	bt, err := c.tryMembers(ctx, []peer.ID{dead, good}, routeGetUser, nil)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -55,6 +55,7 @@ func TestTryMembersHedgesPastDeadPeer(t *testing.T) {
 }
 
 // TestTryMembersAllFail returns an error (not a hang) when no candidate answers.
+// The route is a write, so this also covers the un-hedged sequential walk.
 func TestTryMembersAllFail(t *testing.T) {
 	boom := errors.New("boom")
 	c := &nodeClient{}

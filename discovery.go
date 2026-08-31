@@ -38,8 +38,9 @@ const maxMemberCandidates = 64
 
 // memberCandidates lists peers that may serve the /public/... routes: members
 // known to have answered before (first), then the DHT routing-table peers
-// (Warpnet member/moderator nodes are DHT servers). The relays are excluded.
-func (c *nodeClient) memberCandidates() []peer.ID {
+// (Warpnet member/moderator nodes are DHT servers). The relays are excluded,
+// and a member still cooling down from a rate limit on this route is demoted.
+func (c *nodeClient) memberCandidates(route string) []peer.ID {
 	seen := make(map[peer.ID]struct{})
 	out := make([]peer.ID, 0, maxMemberCandidates)
 	add := func(p peer.ID) {
@@ -70,7 +71,26 @@ func (c *nodeClient) memberCandidates() []peer.ID {
 	if len(out) > maxMemberCandidates {
 		out = out[:maxMemberCandidates]
 	}
-	return out
+	return c.demoteThrottled(route, out)
+}
+
+// demoteThrottled moves members that recently answered "too many requests" on
+// this route to the back. They are kept, not dropped: a throttled node may be
+// the only one holding the data, and it is still better than no answer at all.
+func (c *nodeClient) demoteThrottled(route string, peers []peer.ID) []peer.ID {
+	if c.throttled == nil || c.throttled.Len() == 0 {
+		return peers
+	}
+	ready := make([]peer.ID, 0, len(peers))
+	cooling := make([]peer.ID, 0, len(peers))
+	for _, p := range peers {
+		if c.isThrottled(route, p) {
+			cooling = append(cooling, p)
+			continue
+		}
+		ready = append(ready, p)
+	}
+	return append(ready, cooling...)
 }
 
 // streamToMember resolves the peer's addresses via the DHT if needed, then sends

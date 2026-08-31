@@ -33,11 +33,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
 	camouflage "github.com/Warp-net/libp2p-camouflage-transport"
+	"github.com/Warp-net/warpnet/event"
 	"github.com/Warp-net/warpnet/security"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/libp2p/go-libp2p"
@@ -55,6 +57,7 @@ var (
 	errNoEntryPeers     = errors.New("no Warpnet entry peers (check NODE_NETWORK)")
 	errNoEntryReachable = errors.New("nodeclient: no Warpnet entry peer reachable")
 	errNoListenAddr     = errors.New("no libp2p listen address (add one to p2pListenByNetwork)")
+	errNodeRateLimited  = errors.New("node rate limited this route")
 )
 
 // owner cache bounds: ownership can move between nodes, so entries expire and
@@ -71,14 +74,35 @@ const (
 // (raced with a small stagger), so a stuck node costs at most hedgeDelay.
 const (
 	// requestTimeout bounds one whole route request end to end.
-	requestTimeout = 25 * time.Second
+	requestTimeout = 40 * time.Second
 	// perPeerTimeout bounds a single member attempt (DHT FindPeer + dial + round
-	// trip) so an unreachable node is abandoned quickly.
-	perPeerTimeout = 8 * time.Second
+	// trip) so an unreachable node is abandoned quickly. It matches the FindPeer
+	// budget in streamToMember: a shorter one cut the relay re-dial that follows
+	// every circuit expiry short, and reported a live node as unreachable.
+	perPeerTimeout = 15 * time.Second
 	// hedgeDelay is how long to wait for the in-flight attempt(s) before racing
 	// the next candidate in parallel. The fast common case (the remembered-good
 	// node answers) still makes a single dial; a stalled primary is overtaken.
 	hedgeDelay = 2 * time.Second
+)
+
+// Rate limiting. Warpnet limits inbound streams per route and peer, and the
+// gateway is one peer id carrying the whole Fediverse's traffic, so it meets
+// that limit far sooner than a member node does. A refused request answers
+// instantly, which is exactly what a hedged race rewards — the cooldown keeps a
+// node that refused a route out of the way until its bucket has drained.
+const (
+	throttleCooldown  = 15 * time.Second
+	throttleCacheSize = 2048
+)
+
+// Profile reads are the gateway's hottest node call — every actor document,
+// webfinger and inbox POST resolves one — and a Mastodon instance discovering
+// an account asks for the same handle repeatedly. Cached in memory for a short
+// window only (statelessness): nothing is written to disk.
+const (
+	userCacheSize = 2048
+	userCacheTTL  = time.Minute
 )
 
 // nodeClient joins the Warpnet DHT through the network's relays and streams the
@@ -93,6 +117,9 @@ type nodeClient struct {
 	mu    sync.Mutex
 	good  []peer.ID                       // member nodes known to answer data routes; tried first
 	owner *expirable.LRU[string, peer.ID] // userID -> its home node (domain.User.NodeId); user-scoped routes target it
+
+	throttled *expirable.LRU[string, struct{}]    // "route|peer" that answered rate-limited; demoted while it cools down
+	users     *expirable.LRU[string, warpnetUser] // profile reads, userCacheTTL
 
 	// stream sends one attempt to a single member; defaults to streamToMember and
 	// is overridable in tests to exercise the hedging/timeout logic without a host.
@@ -226,7 +253,9 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 
 	c := &nodeClient{
 		h: h, priv: priv, dht: kdht, network: network, relays: relays,
-		owner: expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		owner:     expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
+		users:     expirable.NewLRU[string, warpnetUser](userCacheSize, nil, userCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c, nil
@@ -238,14 +267,14 @@ func (c *nodeClient) request(route string, payload any) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
-	peers := c.memberCandidates()
+	peers := c.memberCandidates(route)
 	if len(peers) == 0 && c.dht != nil {
 		select { // routing table not populated yet — refresh and retry
 		case <-c.dht.RefreshRoutingTable():
 		case <-time.After(15 * time.Second):
 		case <-ctx.Done():
 		}
-		peers = c.memberCandidates()
+		peers = c.memberCandidates(route)
 	}
 	if len(peers) == 0 {
 		return nil, fmt.Errorf("nodeclient: %s: %s: no Warpnet member nodes discovered yet", c.network, route)
@@ -292,6 +321,11 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 
 	hedge := time.NewTimer(hedgeDelay)
 	defer hedge.Stop()
+	if !isReadRoute(route) {
+		// Racing candidates on a write would hand the same activity to several
+		// members at once, and spends the tightest rate-limit bucket there is.
+		hedge.Stop()
+	}
 
 	var lastErr error
 	for inFlight > 0 {
@@ -300,11 +334,20 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 			return nil, fmt.Errorf("nodeclient: %s: %s: %w", c.network, route, ctx.Err())
 		case r := <-replies:
 			inFlight--
-			if r.err == nil {
+			switch {
+			case r.err != nil:
+				lastErr = r.err
+			case isRateLimited(r.bt):
+				// Refusing is the fastest answer there is, so a throttled node
+				// always wins the race: remembering it would pin every later
+				// request to the one node that will not serve them.
+				c.markThrottled(route, r.peer)
+				netLog(c.network).Infof("nodeclient: %s rate limited %s, trying another member", r.peer, route)
+				lastErr = errNodeRateLimited
+			default:
 				c.remember(r.peer)
 				return r.bt, nil
 			}
-			lastErr = r.err
 			launchNext() // a candidate failed — try the next one right away
 		case <-hedge.C:
 			launchNext() // in-flight attempt is slow — hedge with another
@@ -317,6 +360,36 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 	return nil, fmt.Errorf("nodeclient: %s: %s failed on all member nodes: %w", c.network, route, lastErr)
 }
 
+// isRateLimited reports whether the node refused the request with warpnet's
+// rate-limit error. The middleware writes it as an ordinary response body, so
+// the stream itself succeeds and only the payload says the route was denied.
+func isRateLimited(bt []byte) bool {
+	var resp struct {
+		Code int `json:"code"`
+	}
+	if json.Unmarshal(bt, &resp) != nil {
+		return false
+	}
+	return resp.Code == event.RateLimitErrorCode
+}
+
+// isReadRoute reports whether the route only reads, mirroring warpnet's own
+// route classification (stream.WarpRoute.IsGet).
+func isReadRoute(route string) bool {
+	return strings.Contains(route, "/get/")
+}
+
+func (c *nodeClient) markThrottled(route string, p peer.ID) {
+	if c.throttled == nil {
+		return
+	}
+	c.throttled.Add(route+"|"+p.String(), struct{}{})
+}
+
+func (c *nodeClient) isThrottled(route string, p peer.ID) bool {
+	return c.throttled != nil && c.throttled.Contains(route+"|"+p.String())
+}
+
 // requestUser streams a user-scoped route directly to the node that OWNS userID
 // (its domain.User.NodeId). Routes like POST_FOLLOW and GET_FOLLOWERS are
 // authoritative only on the owner node: a random member node silently "accepts"
@@ -324,16 +397,23 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 // made federation depend on which node the DHT happened to answer with. Falls
 // back to the broadcast request when the owner can't be resolved or reached.
 func (c *nodeClient) requestUser(userID, route string, payload any) ([]byte, error) {
-	if owner, ok := c.ownerNode(userID); ok {
+	if owner, ok := c.ownerNode(userID); ok && !c.isThrottled(route, owner) {
 		ctx, cancel := context.WithTimeout(context.Background(), perPeerTimeout)
 		bt, err := c.stream(ctx, owner, route, payload)
 		cancel()
-		if err == nil {
+		switch {
+		case err == nil && !isRateLimited(bt):
 			c.remember(owner)
 			return bt, nil
+		case err == nil:
+			// The owner is still the right node — only its bucket is empty, so
+			// let it cool down instead of forgetting where the user lives.
+			c.markThrottled(route, owner)
+			netLog(c.network).Infof("nodeclient: %s rate limited %s on owner of %s, falling back to broadcast", owner, route, userID)
+		default:
+			netLog(c.network).Warnf("nodeclient: %s on owner of %s failed, falling back to broadcast: %v", route, userID, err)
+			c.forgetOwner(userID)
 		}
-		netLog(c.network).Warnf("nodeclient: %s on owner of %s failed, falling back to broadcast: %v", route, userID, err)
-		c.forgetOwner(userID)
 	}
 	return c.request(route, payload)
 }
@@ -399,6 +479,11 @@ func (s nodeSource) GetUser(preferredUsername string) (warpnetUser, bool) {
 // no network of its own), so a miss on the others is the normal case — the
 // caller reports it once when no network has the user.
 func (c *nodeClient) lookupUser(preferredUsername string) (warpnetUser, bool) {
+	if c.users != nil {
+		if u, ok := c.users.Get(preferredUsername); ok {
+			return u, true
+		}
+	}
 	bt, err := c.request(routeGetUser, getUserEvent{UserId: preferredUsername})
 	if err != nil {
 		netLog(c.network).Debugf("nodesource: get user %s: %v", preferredUsername, err)
@@ -408,12 +493,18 @@ func (c *nodeClient) lookupUser(preferredUsername string) (warpnetUser, bool) {
 	if uerr := json.Unmarshal(bt, &u); uerr != nil || u.Id == "" {
 		return warpnetUser{}, false
 	}
-	return warpnetUser{
+	wu := warpnetUser{
 		ID:                u.Id,
 		PreferredUsername: u.Id,
 		DisplayName:       u.Username,
 		Summary:           u.Bio,
 		Avatar:            u.AvatarKey,
 		Background:        u.BackgroundImageKey,
-	}, true
+	}
+	// Only a hit is cached: a miss means another joined network may serve the
+	// handle, and caching that would pin a 404 on a user who does exist.
+	if c.users != nil {
+		c.users.Add(preferredUsername, wu)
+	}
+	return wu, true
 }

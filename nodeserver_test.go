@@ -51,6 +51,9 @@ func newTestNode(t *testing.T, seed string) *nodeClient {
 		network: defaultWarpnetNetwork,
 		relays:  map[peer.ID]struct{}{},
 		owner:   expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+
+		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
+		users:     expirable.NewLRU[string, warpnetUser](userCacheSize, nil, userCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c

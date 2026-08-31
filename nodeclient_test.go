@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Warp-net/warpnet/event"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -74,7 +76,7 @@ func TestMemberCandidates(t *testing.T) {
 	member := peer.ID("member-1")
 	c.good = []peer.ID{member, member, relay, c.h.ID(), ""}
 
-	got := c.memberCandidates()
+	got := c.memberCandidates(routeGetUser)
 	// Relays serve discovery only, our own id is not a data peer, and duplicates
 	// would just re-dial the same node.
 	if len(got) != 1 || got[0] != member {
@@ -87,7 +89,7 @@ func TestMemberCandidatesIsCapped(t *testing.T) {
 	for i := range maxMemberCandidates + 10 {
 		c.good = append(c.good, peer.ID("peer-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+string(rune('a'+i/26))))
 	}
-	if got := len(c.memberCandidates()); got > maxMemberCandidates {
+	if got := len(c.memberCandidates(routeGetUser)); got > maxMemberCandidates {
 		t.Fatalf("candidates = %d, want at most %d", got, maxMemberCandidates)
 	}
 }
@@ -373,5 +375,166 @@ func TestRequestRefreshesAnEmptyRoutingTable(t *testing.T) {
 		}
 	case <-time.After(requestTimeout):
 		t.Fatal("request did not give up on an empty routing table")
+	}
+}
+
+// rateLimitedBody is what a node answers with when its per-route/peer bucket is
+// empty: an ordinary response body, not a transport error.
+func rateLimitedBody(t *testing.T) []byte {
+	t.Helper()
+	bt, err := json.Marshal(event.ResponseError{
+		Code: event.RateLimitErrorCode, Message: "middleware: too many requests for this route",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return bt
+}
+
+// A rate-limited node answers instantly, so it always wins a hedged race. If
+// that counted as success the gateway would remember it and pin every later
+// request to the one node refusing them.
+func TestTryMembersSkipsARateLimitedMember(t *testing.T) {
+	limited, member := peer.ID("limited-node"), peer.ID("member-1")
+
+	c, _ := stubbedClient(t, func(p peer.ID, _ string, _ any) ([]byte, error) {
+		if p == limited {
+			return rateLimitedBody(t), nil
+		}
+		return []byte(`{"id":"alice"}`), nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	bt, err := c.tryMembers(ctx, []peer.ID{limited, member}, routeGetUser, nil)
+	if err != nil {
+		t.Fatalf("tryMembers: %v", err)
+	}
+	if string(bt) != `{"id":"alice"}` {
+		t.Fatalf("tryMembers returned the rate-limit body: %s", bt)
+	}
+	if len(c.good) == 0 || c.good[0] != member {
+		t.Fatalf("winning peer not remembered: %v", c.good)
+	}
+	if slices.Contains(c.good, limited) {
+		t.Fatalf("rate-limited peer was remembered as good: %v", c.good)
+	}
+	if !c.isThrottled(routeGetUser, limited) {
+		t.Fatal("rate-limited peer was not marked to cool down")
+	}
+	if c.isThrottled(routeGetTweets, limited) {
+		t.Fatal("cooldown leaked to another route")
+	}
+}
+
+// Every candidate refusing must surface as an error, not as the refusal body
+// handed back to the caller as if it were data.
+func TestTryMembersAllRateLimited(t *testing.T) {
+	c, _ := stubbedClient(t, func(peer.ID, string, any) ([]byte, error) {
+		return rateLimitedBody(t), nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	if _, err := c.tryMembers(ctx, []peer.ID{"a", "b"}, routeGetUser, nil); !errors.Is(err, errNodeRateLimited) {
+		t.Fatalf("err = %v, want errNodeRateLimited", err)
+	}
+}
+
+// Hedging a write would deliver the same activity to several members at once
+// and spend the tightest rate-limit bucket there is.
+func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var inFlight int
+
+	c := &nodeClient{}
+	c.stream = func(ctx context.Context, _ peer.ID, _ string, _ any) ([]byte, error) {
+		mu.Lock()
+		inFlight++
+		mu.Unlock()
+		select {
+		case <-release:
+			return []byte(`{}`), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.tryMembers(ctx, []peer.ID{"a", "b", "c"}, routePostFollow, nil)
+	}()
+
+	time.Sleep(3 * hedgeDelay) // long enough for a hedge to have fired
+	mu.Lock()
+	launched := inFlight
+	mu.Unlock()
+	close(release)
+	<-done
+
+	if launched != 1 {
+		t.Fatalf("write route launched %d attempts, want 1 (no hedging)", launched)
+	}
+}
+
+func TestDemoteThrottledMovesCoolingMembersLast(t *testing.T) {
+	c := newTestNode(t, "demote")
+	cooling, ready := peer.ID("cooling"), peer.ID("ready")
+	c.markThrottled(routeGetUser, cooling)
+
+	got := c.demoteThrottled(routeGetUser, []peer.ID{cooling, ready})
+	if len(got) != 2 || got[0] != ready || got[1] != cooling {
+		t.Fatalf("demoteThrottled = %v, want the cooling member last but kept", got)
+	}
+}
+
+// A profile read is the gateway's hottest node call; a Mastodon instance asks
+// for the same handle several times while discovering an account.
+func TestLookupUserCachesTheProfile(t *testing.T) {
+	var calls int
+	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
+		if route != routeGetUser {
+			return []byte(`{}`), nil
+		}
+		calls++
+		return json.Marshal(user{Id: "alice", Username: "Alice"})
+	})
+	c.good = []peer.ID{peer.ID("member-1")}
+
+	for range 3 {
+		u, ok := c.lookupUser("alice")
+		if !ok || u.DisplayName != "Alice" {
+			t.Fatalf("lookupUser = %+v, %v", u, ok)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("lookupUser hit the node %d times, want 1", calls)
+	}
+}
+
+// A miss must not be cached: another joined network may serve the handle.
+func TestLookupUserDoesNotCacheAMiss(t *testing.T) {
+	var calls int
+	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
+		if route == routeGetUser {
+			calls++
+		}
+		return []byte(`{}`), nil
+	})
+	c.good = []peer.ID{peer.ID("member-1")}
+
+	for range 2 {
+		if _, ok := c.lookupUser("nobody"); ok {
+			t.Fatal("lookupUser: unknown handle reported as found")
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("lookupUser made %d node calls, want 2 (misses are not cached)", calls)
 	}
 }
