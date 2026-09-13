@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -129,7 +130,7 @@ func TestTranslateInboundRejectsIncompleteActivities(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			if route, _, _, ok := g.translateInbound(raw); ok {
+			if route, _, _, ok := g.translateInbound(context.Background(), raw); ok {
 				t.Fatalf("translated to %q, want it refused", route)
 			}
 		})
@@ -168,7 +169,7 @@ func TestTranslateInboundReportsTheTargetedLocalUser(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			route, _, localUser, ok := g.translateInbound(raw)
+			route, _, localUser, ok := g.translateInbound(context.Background(), raw)
 			if !ok {
 				t.Fatalf("not translated")
 			}

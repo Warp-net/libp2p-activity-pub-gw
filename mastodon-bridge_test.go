@@ -20,6 +20,7 @@ func newBridgeFixture(t *testing.T) (*mastodonBridge, *gateway, *fakeInstance) {
 	t.Helper()
 	g := testGateway(t)
 	g.actorIDs = expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL)
+	g.handles = expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL)
 	f := newFakeInstance(t).attach(g)
 	return newMastodonBridge(g, "node-1"), g, f
 }
@@ -1248,5 +1249,252 @@ func TestGetFollowingsPropagatesFailures(t *testing.T) {
 	}
 	if _, err := b.GetFollowers(context.Background(), "ghost@"+f.host(), nil); err == nil {
 		t.Fatal("expected an error for an unresolvable handle")
+	}
+}
+
+// TestGetTweetsFallsBackToTheMirror covers the Threads shape: an account whose
+// own server serves no Mastodon REST API and answers its outbox with a bare
+// count, leaving an instance that federates with it as the only reachable
+// source. The posts must keep their canonical ids on the account's own server,
+// so a reply or a like still goes to the real thing and not to the copy.
+func TestGetTweetsFallsBackToTheMirror(t *testing.T) {
+	b, _, own := newBridgeFixture(t)
+	mirror := newFakeInstance(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+
+	handle := "bob@" + own.host()
+	actorURL := own.actor("bob", nil)
+	own.webfingerFor("bob", actorURL)
+	own.serveDoc("/users/bob/outbox", contentTypeAP, map[string]any{
+		"type": "OrderedCollection", "totalItems": 812, // a count, no first page
+	})
+	canonical := own.url("/users/bob/post/1")
+	mirror.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{"id": "42"})
+	mirror.serveDoc("/api/v1/accounts/42/statuses", "application/json", []any{
+		map[string]any{
+			"id": "1001", "uri": canonical, "created_at": "2026-08-13T14:57:20Z",
+			"content": "<p>from the mirror</p>",
+			"account": map[string]any{"acct": handle},
+		},
+	})
+
+	resp, err := b.GetTweets(context.Background(), handle, nil)
+	if err != nil {
+		t.Fatalf("GetTweets: %v", err)
+	}
+	if len(resp.Tweets) != 1 {
+		t.Fatalf("tweets = %+v, want the mirrored post", resp.Tweets)
+	}
+	got := resp.Tweets[0]
+	if got.Id != canonical {
+		t.Errorf("id = %q, want the canonical uri %q", got.Id, canonical)
+	}
+	if got.UserId != handle || got.Username != handle {
+		t.Errorf("author = %q/%q, want the account handle %q", got.UserId, got.Username, handle)
+	}
+	if got.Text != "from the mirror" {
+		t.Errorf("text = %q", got.Text)
+	}
+	if !strings.Contains(resp.Cursor, mirror.host()) || !strings.Contains(resp.Cursor, "max_id=1001") {
+		t.Errorf("cursor = %q, want the mirror's next page", resp.Cursor)
+	}
+}
+
+// TestMirrorIsOnlyALastResort: an instance that serves its own posts is
+// authoritative, so the copy is never consulted for it.
+func TestMirrorIsOnlyALastResort(t *testing.T) {
+	b, _, own := newBridgeFixture(t)
+	mirror := newFakeInstance(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+
+	handle := "bob@" + own.host()
+	own.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{"id": "7"})
+	own.serveDoc("/api/v1/accounts/7/statuses", "application/json", []any{
+		map[string]any{
+			"id": "9", "uri": own.url("/statuses/9"), "created_at": "2026-08-13T14:57:20Z",
+			"content": "<p>own</p>", "account": map[string]any{"acct": handle},
+		},
+	})
+
+	resp, err := b.GetTweets(context.Background(), handle, nil)
+	if err != nil || len(resp.Tweets) != 1 {
+		t.Fatalf("GetTweets = %+v, %v", resp.Tweets, err)
+	}
+	if n := mirror.hitCount("/api/v1/accounts/lookup"); n != 0 {
+		t.Fatalf("mirror consulted %d times for an instance that answers for itself", n)
+	}
+}
+
+// TestMirrorTweetsSkips covers the cases where there is nothing to ask.
+func TestMirrorTweetsSkips(t *testing.T) {
+	b, _, f := newBridgeFixture(t)
+	ctx := context.Background()
+
+	t.Setenv("GATEWAY_AP_MIRROR", "")
+	if _, ok := b.mirrorTweets(ctx, "bob@"+f.host()); ok {
+		t.Error("no mirror configured: want no fallback")
+	}
+	t.Setenv("GATEWAY_AP_MIRROR", f.host())
+	if _, ok := b.mirrorTweets(ctx, "bob@"+f.host()); ok {
+		t.Error("mirror is the account own instance: want no second lookup")
+	}
+	if _, ok := b.mirrorTweets(ctx, "nohandle"); ok {
+		t.Error("not a handle: want no fallback")
+	}
+}
+
+// TestCanonicalHandleResolvesAnOpaqueID: an actor served under a numeric id is
+// the one case the url cannot be trusted for — the id is not what WebFinger
+// answers for, so the handle has to come from the actor document.
+func TestCanonicalHandleResolvesAnOpaqueID(t *testing.T) {
+	_, g, f := newBridgeFixture(t)
+	ctx := context.Background()
+
+	f.serveDoc("/ap/users/17841452547050663", contentTypeAP, map[string]any{
+		"id": f.url("/ap/users/17841452547050663"), "type": "Person",
+		"preferredUsername": "engineer_of_your_ass",
+	})
+	opaque := f.url("/ap/users/17841452547050663")
+	want := "engineer_of_your_ass@" + f.host()
+	if got := g.canonicalHandle(ctx, opaque); got != want {
+		t.Fatalf("canonical handle = %q, want %q", got, want)
+	}
+	// Second call is served from the cache.
+	if got := g.canonicalHandle(ctx, opaque); got != want {
+		t.Fatalf("cached handle = %q", got)
+	}
+	if n := f.hitCount("/ap/users/17841452547050663"); n != 1 {
+		t.Errorf("actor fetched %d times, want it cached after the first", n)
+	}
+
+	// An ordinary handle is read off the url and costs no fetch at all.
+	plain := f.url("/users/bob")
+	if got := g.canonicalHandle(ctx, plain); got != "bob@"+f.host() {
+		t.Fatalf("plain handle = %q", got)
+	}
+	if n := f.hitCount("/users/bob"); n != 0 {
+		t.Errorf("ordinary handle cost %d fetches, want 0", n)
+	}
+}
+
+// TestCanonicalHandleFallsBackWhenTheActorIsGone keeps an activity from being
+// dropped when the lookup fails.
+func TestCanonicalHandleFallsBackWhenTheActorIsGone(t *testing.T) {
+	_, g, f := newBridgeFixture(t)
+	gone := f.url("/ap/users/999")
+	if got := g.canonicalHandle(context.Background(), gone); got != "999@"+f.host() {
+		t.Fatalf("handle = %q, want the url-derived fallback", got)
+	}
+}
+
+// TestGetUserFallsBackToTheMirror: Threads answers its collections with bare
+// counts and can refuse the actor outright, so the mirror's single account
+// object is the whole profile.
+func TestGetUserFallsBackToTheMirror(t *testing.T) {
+	b, _, own := newBridgeFixture(t)
+	mirror := newFakeInstance(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+
+	handle := "bob@" + own.host() // own instance serves no webfinger and no actor
+	mirror.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{
+		"id": "42", "username": "bob", "display_name": "Bob", "note": "<p>hi</p>",
+		"followers_count": float64(9), "statuses_count": float64(4),
+	})
+
+	u, err := b.GetUser(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if u.Id != handle || u.Username != "Bob" || u.FollowersCount != 9 || u.TweetsCount != 4 {
+		t.Fatalf("user = %+v, want the mirrored profile with its counts", u)
+	}
+}
+
+// TestThreadFollowsTheInstanceItWasReadFrom: a mirrored status has an id on the
+// mirror, not on the server that published it, and only that id opens its
+// thread. The pairing is learned from the page that produced the tweet.
+func TestThreadFollowsTheInstanceItWasReadFrom(t *testing.T) {
+	b, _, own := newBridgeFixture(t)
+	mirror := newFakeInstance(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+
+	handle := "bob@" + own.host()
+	canonical := own.url("/ap/users/bob/post/1/")
+	own.serveDoc("/users/bob/outbox", contentTypeAP, map[string]any{"type": "OrderedCollection", "totalItems": 3})
+	own.webfingerFor("bob", own.actor("bob", nil))
+	mirror.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{"id": "42"})
+	mirror.serveDoc("/api/v1/accounts/42/statuses", "application/json", []any{
+		map[string]any{
+			"id": "1001", "uri": canonical, "created_at": "2026-08-13T14:57:20Z",
+			"content": "<p>root</p>", "account": map[string]any{"acct": handle},
+		},
+	})
+	mirror.serveDoc("/api/v1/statuses/1001/context", "application/json", map[string]any{
+		"ancestors": []any{},
+		"descendants": []any{
+			map[string]any{
+				"id": "1002", "uri": own.url("/ap/users/ann/post/2/"), "in_reply_to_id": "1001",
+				"created_at": "2026-08-13T15:00:00Z", "content": "<p>reply</p>",
+				"account": map[string]any{"acct": "ann@" + own.host()},
+			},
+		},
+	})
+
+	if _, err := b.GetTweets(context.Background(), handle, nil); err != nil {
+		t.Fatalf("GetTweets: %v", err)
+	}
+	replies, err := b.GetReplies(context.Background(), canonical)
+	if err != nil {
+		t.Fatalf("GetReplies: %v", err)
+	}
+	if len(replies.Tweets) != 1 || replies.Tweets[0].Id != own.url("/ap/users/ann/post/2/") {
+		t.Fatalf("replies = %+v, want the one read through the mirror", replies.Tweets)
+	}
+	if replies.Tweets[0].ParentId == nil || *replies.Tweets[0].ParentId != canonical {
+		t.Fatalf("parent = %v, want the canonical root", replies.Tweets[0].ParentId)
+	}
+}
+
+// TestRestAccountRemembersAMiss: a host with no answer for an account is probed
+// once, not on every profile view and every 75s timeline poll.
+func TestRestAccountRemembersAMiss(t *testing.T) {
+	b, _, f := newBridgeFixture(t)
+	ctx := context.Background()
+	handle := "ghost@" + f.host()
+
+	for range 3 {
+		if _, ok := b.restAccount(ctx, handle, f.host()); ok {
+			t.Fatal("unknown account must not resolve")
+		}
+	}
+	if n := f.hitCount("/api/v1/accounts/lookup"); n != 1 {
+		t.Fatalf("probed %d times, want it remembered after the first", n)
+	}
+}
+
+// TestMirrorAccountNamesAnOpaqueActor: Threads serves some actors under an
+// opaque id and gates every fetch behind a signature it may reject, so the
+// handle has to come from somewhere else. A mirror's account object pairs the
+// actor url with the handle, which is enough to never ask the origin at all.
+func TestMirrorAccountNamesAnOpaqueActor(t *testing.T) {
+	b, g, f := newBridgeFixture(t)
+	mirror := newFakeInstance(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+	ctx := context.Background()
+
+	handle := "engineer@" + f.host()
+	opaque := f.url("/ap/users/17841452547050663/")
+	mirror.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{
+		"id": "42", "username": "engineer", "acct": handle, "uri": opaque,
+	})
+
+	if _, ok := b.mirrorUser(ctx, handle); !ok {
+		t.Fatal("mirror must answer for the account")
+	}
+	if got := g.canonicalHandle(ctx, opaque); got != handle {
+		t.Fatalf("canonical handle = %q, want %q", got, handle)
+	}
+	if n := f.hitCount("/ap/users/17841452547050663/"); n != 0 {
+		t.Errorf("origin actor fetched %d times, want the pairing taken from the mirror", n)
 	}
 }

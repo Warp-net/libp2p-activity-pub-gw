@@ -113,14 +113,14 @@ func (g *gateway) handleInbox(w http.ResponseWriter, r *http.Request, user strin
 	case typeDelete:
 		g.handleDelete(w, raw)
 	default:
-		g.handleInboundActivity(w, typ, raw)
+		g.handleInboundActivity(r.Context(), w, typ, raw)
 	}
 }
 
 // handleInboundActivity translates a non-Follow inbound activity into a Warpnet
 // route and forwards it to the owner's node, bounded by the delivery semaphore.
-func (g *gateway) handleInboundActivity(w http.ResponseWriter, typ string, raw map[string]any) {
-	route, payload, localUser, ok := g.translateInbound(raw)
+func (g *gateway) handleInboundActivity(ctx context.Context, w http.ResponseWriter, typ string, raw map[string]any) {
+	route, payload, localUser, ok := g.translateInbound(ctx, raw)
 	if !ok {
 		log.Infof("inbox: %q acknowledged, not handled", typ)
 		w.WriteHeader(http.StatusAccepted)

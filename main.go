@@ -40,9 +40,10 @@ resulting from the use or misuse of this software.
 // connector to the Warpnet network.
 //
 // Configuration is environment-only and intentionally minimal: GATEWAY_KEY,
-// GATEWAY_FUNNEL_DIR, GATEWAY_FUNNEL_HOSTNAME, TS_AUTHKEY, and the standard
-// NODE_NETWORK (one name or a comma-separated list, each network's node also
-// switchable on its own via GATEWAY_DISABLE_<NETWORK>). It does NOT use CLI
+// GATEWAY_FUNNEL_DIR, GATEWAY_FUNNEL_HOSTNAME, TS_AUTHKEY, GATEWAY_AP_MIRROR
+// (the instance asked for posts an account's own server will not serve), and the
+// standard NODE_NETWORK (one name or a comma-separated list, each network's node
+// also switchable on its own via GATEWAY_DISABLE_<NETWORK>). It does NOT use CLI
 // flags: importing the libp2p stack pulls in config.init's pflag.Parse, which
 // would clash with a second flag set, and every other Warpnet node is
 // env-configured too.
@@ -68,7 +69,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.100"
+const gatewayVersion = "0.1.101"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -161,6 +162,7 @@ func main() {
 		retrier:   retrier.New(300*time.Millisecond, 3, retrier.ExponentialBackoff),
 		getCache:  expirable.NewLRU[string, cachedGet](getCacheSize, nil, getCacheTTL),
 		actorIDs:  expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL),
+		handles:   expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL),
 		logs:      logs,
 		logsToken: os.Getenv("GATEWAY_LOGS_TOKEN"),
 	}

@@ -300,7 +300,7 @@ func (o *outboundFederation) scan(scanUser string) {
 			return
 		}
 		for _, u := range resp.Users {
-			if u.Network == mastodonNetwork { // bridged account, lives in Mastodon already
+			if isBridgedNetwork(u.Network) { // bridged account, lives in its own network already
 				continue
 			}
 			urls, ferr := followers.List(u.Id)

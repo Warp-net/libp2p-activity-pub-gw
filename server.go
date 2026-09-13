@@ -134,6 +134,10 @@ type gateway struct {
 	// call. Transient, in memory — the graph itself lives in Warpnet.
 	actorIDs *expirable.LRU[string, string]
 
+	// handles caches the reverse, actor url -> handle, for the servers whose
+	// urls don't spell it (see canonicalHandle). Transient, in memory.
+	handles *expirable.LRU[string, string]
+
 	// sf collapses concurrent identical signed GETs onto a single upstream
 	// round-trip. getCache only dedupes sequential bursts (it fills after a
 	// request returns), so the overlapping author/stats/context fetches a reply
