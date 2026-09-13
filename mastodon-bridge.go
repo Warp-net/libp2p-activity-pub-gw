@@ -319,6 +319,17 @@ func (b *mastodonBridge) getUser(ctx context.Context, handle string, withCounts 
 			return mu, nil
 		}
 	}
+	// A list context skips the three collection fetches, which leaves the counts
+	// at zero — and the asking node stores whatever it is handed, so those zeros
+	// land on top of the real numbers and the profile reads "0 Followers" until
+	// something refreshes it. The account's own REST API carries the profile and
+	// its counts in the single request the brief path already budgets for, so
+	// nothing is skipped and nothing is zeroed.
+	if !withCounts {
+		if hu, ok := b.hostUser(ctx, handle); ok {
+			return hu, nil
+		}
+	}
 	u, err := b.apUser(ctx, handle, withCounts)
 	if err == nil {
 		return u, nil
@@ -493,6 +504,17 @@ func mirrorFor(handle string) (string, bool) {
 	return mirror, true
 }
 
+// restUser reads a profile from apiHost's Mastodon REST API. The one request
+// carries the profile and its counts, where ActivityPub needs an actor fetch
+// plus a collection each for followers, followings and posts.
+func (b *mastodonBridge) restUser(ctx context.Context, handle, apiHost string) (user, bool) {
+	acc, ok := b.restAccount(ctx, handle, apiHost)
+	if !ok {
+		return user{}, false
+	}
+	return restAccountToUser(handle, acc, b.nodeID), true
+}
+
 // mirrorUser reads a profile from the mirror instance, under the same conditions
 // as mirrorTweets.
 func (b *mastodonBridge) mirrorUser(ctx context.Context, handle string) (user, bool) {
@@ -500,11 +522,16 @@ func (b *mastodonBridge) mirrorUser(ctx context.Context, handle string) (user, b
 	if !ok {
 		return user{}, false
 	}
-	acc, ok := b.restAccount(ctx, handle, mirror)
-	if !ok {
+	return b.restUser(ctx, handle, mirror)
+}
+
+// hostUser reads a profile from the account's own instance.
+func (b *mastodonBridge) hostUser(ctx context.Context, handle string) (user, bool) {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	if !ok || instance == "" {
 		return user{}, false
 	}
-	return restAccountToUser(handle, acc, b.nodeID), true
+	return b.restUser(ctx, handle, instance)
 }
 
 // isRESTStatusesURL reports whether a pagination cursor points at the Mastodon

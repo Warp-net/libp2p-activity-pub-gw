@@ -1591,3 +1591,30 @@ func TestCanonicalHandlePrefersRESTOverTheActor(t *testing.T) {
 		t.Fatalf("remote acct = %q", got)
 	}
 }
+
+// TestBriefUserCarriesCounts pins the bug that zeroed a bridged profile: a list
+// context skipped the collection fetches, handed back a user with zero counts,
+// and the asking node stored those over the real numbers. The host's own REST
+// API carries them in the request the brief path already makes.
+func TestBriefUserCarriesCounts(t *testing.T) {
+	b, _, f := newBridgeFixture(t)
+	ctx := context.Background()
+	handle := "warpnet@" + f.host()
+
+	f.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{
+		"id": "7", "username": "warpnet", "acct": handle,
+		"followers_count": float64(8), "following_count": float64(38), "statuses_count": float64(23),
+	})
+
+	u, err := b.GetUserBrief(ctx, handle)
+	if err != nil {
+		t.Fatalf("GetUserBrief: %v", err)
+	}
+	if u.FollowersCount != 8 || u.FollowingsCount != 38 || u.TweetsCount != 23 {
+		t.Fatalf("counts = %d/%d/%d, want 8/38/23", u.FollowersCount, u.FollowingsCount, u.TweetsCount)
+	}
+	// The collections were never walked: one request, not four.
+	if n := f.hitCount("/users/warpnet/followers"); n != 0 {
+		t.Errorf("followers collection fetched %d times, want the REST counts used", n)
+	}
+}
