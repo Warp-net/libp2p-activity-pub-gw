@@ -243,6 +243,16 @@ func (g *gateway) canonicalHandle(ctx context.Context, actorURL string) string {
 			return handle
 		}
 	}
+	// A Mastodon-family host names the account behind an opaque id over its
+	// public REST API, unauthenticated and in a fraction of the time a signed
+	// actor fetch takes. It is tried first because the actor fetch needs our own
+	// actor to be dereferenceable by the peer, and a peer in secure mode refuses
+	// it outright when it is not.
+	opaque := path.Base(strings.TrimRight(u.Path, "/"))
+	if handle := g.restHandleByID(ctx, u.Host, opaque); handle != "" {
+		g.rememberHandle(actorURL, handle)
+		return handle
+	}
 	m, err := g.fetchActor(ctx, actorURL)
 	if err != nil {
 		log.Warnf("mastodon: canonical handle for %s: %v", actorURL, err)
@@ -255,6 +265,27 @@ func (g *gateway) canonicalHandle(ctx context.Context, actorURL string) string {
 	handle := name + "@" + canonicalHost(u.Host)
 	g.rememberHandle(actorURL, handle)
 	return handle
+}
+
+// restHandleByID names the account an opaque actor id belongs to through the
+// host's Mastodon REST API. Empty when the host serves none (Threads 404s) or
+// does not know the id.
+func (g *gateway) restHandleByID(ctx context.Context, host, id string) string {
+	if host == "" || id == "" || id == "." || id == "/" {
+		return ""
+	}
+	m, err := g.apGetJSON(ctx, "https://"+host+"/api/v1/accounts/"+url.PathEscape(id), "application/json")
+	if err != nil {
+		return ""
+	}
+	acct := asString(m["acct"])
+	if acct == "" {
+		return ""
+	}
+	if strings.Contains(acct, "@") {
+		return acct // a remote account the host knows, already a full handle
+	}
+	return acct + "@" + canonicalHost(host)
 }
 
 // rememberHandle records an actor url -> handle pairing learned elsewhere, so
@@ -283,6 +314,11 @@ func (b *mastodonBridge) GetUserBrief(ctx context.Context, handle string) (user,
 }
 
 func (b *mastodonBridge) getUser(ctx context.Context, handle string, withCounts bool) (user, error) {
+	if mirrorFirst(handle) {
+		if mu, ok := b.mirrorUser(ctx, handle); ok {
+			return mu, nil
+		}
+	}
 	u, err := b.apUser(ctx, handle, withCounts)
 	if err == nil {
 		return u, nil
@@ -382,6 +418,11 @@ func (b *mastodonBridge) GetTweets(ctx context.Context, handle string, cursor *s
 		}
 		return b.apTweets(ctx, handle, cursor)
 	}
+	if mirrorFirst(handle) {
+		if mirrored, ok := b.mirrorTweets(ctx, handle); ok {
+			return mirrored, nil
+		}
+	}
 	if resp, ok := b.restTweets(ctx, handle); ok {
 		return resp, nil
 	}
@@ -418,6 +459,17 @@ func mirrorHost() string { return envOr("GATEWAY_AP_MIRROR", defaultMirrorHost) 
 // instance (restTweets already asked it), or when the mirror does not know the
 // account: it only holds accounts someone there follows, which is the standing
 // limit of this path.
+// mirrorFirst reports whether a handle's own server is known not to serve its
+// posts or profile, so the mirror is asked before it rather than after. Threads
+// answers its outbox and its follow collections with bare counts and serves no
+// REST API: going to the origin first costs five requests and six seconds to
+// learn nothing, and hands back an avatar url on Meta's CDN that expires within
+// days, where the mirror's copy is stable. The origin stays the fallback.
+func mirrorFirst(handle string) bool {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	return ok && isThreadsHost(instance)
+}
+
 func (b *mastodonBridge) mirrorTweets(ctx context.Context, handle string) (tweetsResponse, bool) {
 	mirror, ok := mirrorFor(handle)
 	if !ok {
@@ -1132,14 +1184,14 @@ func (b *mastodonBridge) followList(ctx context.Context, handle string, cursor *
 		if first := asString(page["first"]); first != "" && !hasItems {
 			pageURL = first
 		} else {
-			return b.dropSelfHandles(collectHandles(page)), asString(page["next"]), nil
+			return b.dropSelfHandles(b.collectHandles(ctx, page)), asString(page["next"]), nil
 		}
 	}
 	page, err := b.ap.apGetJSON(ctx, pageURL, contentTypeAP)
 	if err != nil {
 		return []string{}, "", nil //nolint:nilerr // hidden collection -> empty, not an error
 	}
-	return b.dropSelfHandles(collectHandles(page)), asString(page["next"]), nil
+	return b.dropSelfHandles(b.collectHandles(ctx, page)), asString(page["next"]), nil
 }
 
 // dropSelfHandles removes handles hosted by the gateway. A Warpnet user who

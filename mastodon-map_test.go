@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -263,18 +264,20 @@ func TestStripQuoteFallback(t *testing.T) {
 }
 
 func TestCollectHandles(t *testing.T) {
-	got := collectHandles(map[string]any{"orderedItems": []any{
+	b, _, _ := newBridgeFixture(t)
+	ctx := context.Background()
+	got := b.collectHandles(ctx, map[string]any{"orderedItems": []any{
 		"https://m.example/users/bob", "https://o.example/@ann", 42,
 	}})
 	if !reflect.DeepEqual(got, []string{"bob@m.example", "ann@o.example"}) {
 		t.Fatalf("orderedItems: %v", got)
 	}
 	// Servers that use "items" instead of "orderedItems" must work too.
-	got = collectHandles(map[string]any{"items": []any{"https://m.example/users/carol"}})
+	got = b.collectHandles(ctx, map[string]any{"items": []any{"https://m.example/users/carol"}})
 	if !reflect.DeepEqual(got, []string{"carol@m.example"}) {
 		t.Fatalf("items: %v", got)
 	}
-	if got := collectHandles(map[string]any{}); len(got) != 0 {
+	if got := b.collectHandles(ctx, map[string]any{}); len(got) != 0 {
 		t.Fatalf("empty page: %v", got)
 	}
 }

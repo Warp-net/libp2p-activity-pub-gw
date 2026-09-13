@@ -32,9 +32,11 @@ package main
 // dependency on the gateway, so they are trivially unit-testable.
 
 import (
+	"context"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -351,15 +353,40 @@ func splitREPrefix(text string) (parentURL, rest string, ok bool) {
 }
 
 // collectHandles maps a collection page's actor-URL items to Fediverse handles.
-func collectHandles(page map[string]any) []string {
+// An item whose url carries an opaque id is named through its actor document:
+// a handle built from such a url resolves to nothing, so the row it produces
+// fails to load and silently disappears from the list. Threads serves its actors
+// that way, and so does Mastodon for accounts created after the switch — three
+// of the first six entries of a real following collection.
+//
+// Only the opaque ones cost a fetch (canonicalHandle), and they run concurrently:
+// a page holds a dozen items and one Threads actor alone answers in seconds.
+func (b *mastodonBridge) collectHandles(ctx context.Context, page map[string]any) []string {
 	items := asSlice(page["orderedItems"])
 	if len(items) == 0 {
 		items = asSlice(page["items"])
 	}
-	out := make([]string, 0, len(items))
-	for _, it := range items {
-		if u := asString(it); u != "" {
-			out = append(out, handleFromActorURL(u))
+	named := make([]string, len(items))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, it := range items {
+		u := asString(it)
+		if u == "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			named[i] = b.ap.canonicalHandle(ctx, u)
+		}()
+	}
+	wg.Wait()
+	out := make([]string, 0, len(named))
+	for _, h := range named {
+		if h != "" {
+			out = append(out, h)
 		}
 	}
 	return out

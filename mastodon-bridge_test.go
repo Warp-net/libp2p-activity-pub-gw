@@ -1498,3 +1498,96 @@ func TestMirrorAccountNamesAnOpaqueActor(t *testing.T) {
 		t.Errorf("origin actor fetched %d times, want the pairing taken from the mirror", n)
 	}
 }
+
+// TestFollowListNamesOpaqueActors pins the bug a real following collection
+// surfaced: its first entry is an actor served under an opaque id, and a handle
+// built from that url resolves to nothing — the row fails to load and vanishes
+// from the list. Three of the first six entries of the live collection were lost
+// that way, including a Threads account.
+func TestFollowListNamesOpaqueActors(t *testing.T) {
+	b, _, f := newBridgeFixture(t)
+	ctx := context.Background()
+
+	actorURL := f.actor("warpnet", nil)
+	f.webfingerFor("warpnet", actorURL)
+	opaque := f.url("/ap/users/17841452547050663/")
+	f.serveDoc("/ap/users/17841452547050663/", contentTypeAP, map[string]any{
+		"id": opaque, "type": "Person", "preferredUsername": "engineer_of_your_ass",
+	})
+	f.serveDoc("/users/warpnet/following", contentTypeAP, map[string]any{
+		"type": "OrderedCollection",
+		"orderedItems": []any{
+			opaque,
+			f.url("/users/bob"),
+			42, // junk items are skipped, not counted as a handle
+		},
+	})
+
+	handles, err := b.GetFollowings(ctx, "warpnet@"+f.host(), nil)
+	if err != nil {
+		t.Fatalf("GetFollowings: %v", err)
+	}
+	want := []string{"engineer_of_your_ass@" + f.host(), "bob@" + f.host()}
+	if !reflect.DeepEqual(handles.Followings, want) {
+		t.Fatalf("followings = %v, want %v", handles.Followings, want)
+	}
+}
+
+// TestThreadsAsksTheMirrorFirst: the origin cannot serve a Threads profile or
+// timeline (bare counts, empty outbox, no REST API), so asking it first only
+// costs requests — and yields an avatar url that expires within days.
+func TestThreadsAsksTheMirrorFirst(t *testing.T) {
+	b, _, mirror := newBridgeFixture(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+	ctx := context.Background()
+
+	const handle = "someone@threads.net"
+	mirror.serveDoc("/api/v1/accounts/lookup", "application/json", map[string]any{
+		"id": "42", "username": "someone", "acct": handle,
+		"avatar": "https://files.example/cache/someone.jpg", "followers_count": float64(5),
+	})
+	mirror.serveDoc("/api/v1/accounts/42/statuses", "application/json", []any{
+		map[string]any{
+			"id": "1", "uri": "https://www.threads.net/ap/users/someone/post/1/",
+			"created_at": "2026-08-13T14:57:20Z", "content": "<p>hi</p>",
+			"account": map[string]any{"acct": handle},
+		},
+	})
+
+	u, err := b.GetUser(ctx, handle)
+	if err != nil || u.AvatarKey != "https://files.example/cache/someone.jpg" {
+		t.Fatalf("user = %+v, err = %v; want the mirror copy", u, err)
+	}
+	resp, rerr := b.GetTweets(ctx, handle, nil)
+	if rerr != nil || len(resp.Tweets) != 1 {
+		t.Fatalf("tweets = %+v, err = %v", resp.Tweets, rerr)
+	}
+	// threads.net was never asked: no webfinger, no actor, no outbox.
+	if n := mirror.hitCount("/.well-known/webfinger"); n != 0 {
+		t.Errorf("origin webfingered %d times, want the mirror asked first", n)
+	}
+}
+
+// TestCanonicalHandlePrefersRESTOverTheActor: naming an opaque actor through the
+// host's public REST API needs no signature, so it works against a peer in
+// secure mode that refuses our signed fetch — and costs a fraction of the time.
+func TestCanonicalHandlePrefersRESTOverTheActor(t *testing.T) {
+	_, g, f := newBridgeFixture(t)
+	ctx := context.Background()
+
+	f.serveDoc("/api/v1/accounts/116859056785813938", "application/json",
+		map[string]any{"acct": "privacynotes", "username": "privacynotes"})
+	opaque := f.url("/ap/users/116859056785813938")
+	// The actor document is deliberately not served: REST alone must be enough.
+	if got := g.canonicalHandle(ctx, opaque); got != "privacynotes@"+f.host() {
+		t.Fatalf("handle = %q, want the REST-resolved acct", got)
+	}
+	if n := f.hitCount("/ap/users/116859056785813938"); n != 0 {
+		t.Errorf("actor fetched %d times, want REST to have answered", n)
+	}
+	// A remote account the host knows already carries its own instance.
+	f.serveDoc("/api/v1/accounts/77", "application/json", map[string]any{"acct": "bob@other.example"})
+	if got := g.canonicalHandle(ctx, f.url("/ap/users/77")); got != "bob@other.example" {
+		t.Fatalf("remote acct = %q", got)
+	}
+}
