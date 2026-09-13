@@ -1618,3 +1618,39 @@ func TestBriefUserCarriesCounts(t *testing.T) {
 		t.Errorf("followers collection fetched %d times, want the REST counts used", n)
 	}
 }
+
+// TestThreadsFollowCollectionsCostNothing: Threads answers its follow
+// collections with a bare count and no members, and no mirror holds the graph,
+// so the request can only cost time — three seconds a tab, measured.
+func TestThreadsFollowCollectionsCostNothing(t *testing.T) {
+	b, _, f := newBridgeFixture(t)
+	t.Setenv("GATEWAY_AP_MIRROR", f.host())
+	ctx := context.Background()
+	const handle = "someone@threads.net"
+
+	followers, err := b.GetFollowers(ctx, handle, nil)
+	if err != nil || len(followers.Followers) != 0 {
+		t.Fatalf("followers = %+v, err = %v", followers.Followers, err)
+	}
+	followings, err := b.GetFollowings(ctx, handle, nil)
+	if err != nil || len(followings.Followings) != 0 {
+		t.Fatalf("followings = %+v, err = %v", followings.Followings, err)
+	}
+	// Neither the origin nor the mirror was asked.
+	if n := f.hitCount("/.well-known/webfinger"); n != 0 {
+		t.Errorf("webfingered %d times, want no request at all", n)
+	}
+	if n := f.hitCount("/api/v1/accounts/lookup"); n != 0 {
+		t.Errorf("mirror asked %d times, want no request at all", n)
+	}
+	// A Mastodon handle still walks its collections as before.
+	actorURL := f.actor("bob", nil)
+	f.webfingerFor("bob", actorURL)
+	f.serveDoc("/users/bob/following", contentTypeAP, map[string]any{
+		"type": "OrderedCollection", "orderedItems": []any{f.url("/users/ann")},
+	})
+	got, err := b.GetFollowings(ctx, "bob@"+f.host(), nil)
+	if err != nil || len(got.Followings) != 1 {
+		t.Fatalf("mastodon followings = %+v, err = %v", got.Followings, err)
+	}
+}

@@ -481,6 +481,19 @@ func mirrorFirst(handle string) bool {
 	return ok && isThreadsHost(instance)
 }
 
+// hollowFollowCollections reports whether a handle's server answers its
+// follower and following collections with a bare count and no members. Threads
+// does, and unlike its posts this cannot be read from a mirror either: an
+// instance that federates with it holds the account but not its graph, and
+// answers both REST endpoints with an empty array. Measured against the live
+// gateway, asking the origin costs three seconds per tab to return nothing, so
+// the only thing left to fix is not to ask. The counts still show — those come
+// from the profile, not from here.
+func hollowFollowCollections(handle string) bool {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	return ok && isThreadsHost(instance)
+}
+
 func (b *mastodonBridge) mirrorTweets(ctx context.Context, handle string) (tweetsResponse, bool) {
 	mirror, ok := mirrorFor(handle)
 	if !ok {
@@ -1189,6 +1202,9 @@ func (b *mastodonBridge) GetFollowings(ctx context.Context, handle string, curso
 // followList resolves the actor's follower/following collection to handles.
 // Instances that hide the member list yield an empty result.
 func (b *mastodonBridge) followList(ctx context.Context, handle string, cursor *string, field string) ([]string, string, error) {
+	if hollowFollowCollections(handle) {
+		return []string{}, "", nil
+	}
 	pageURL := pageCursor(cursor)
 	if pageURL == "" {
 		actorURL, err := b.resolveHandle(ctx, handle)
