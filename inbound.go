@@ -28,6 +28,7 @@ resulting from the use or misuse of this software.
 package main
 
 import (
+	"context"
 	"net/url"
 	"path"
 	"strings"
@@ -49,7 +50,7 @@ const (
 // It also reports the local Warpnet user the activity is aimed at. With several
 // networks joined that user picks the one network the write belongs in — see
 // gateway.requestForUser.
-func (g *gateway) translateInbound(raw map[string]any) (string, any, string, bool) {
+func (g *gateway) translateInbound(ctx context.Context, raw map[string]any) (string, any, string, bool) {
 	actor, _ := raw[keyActor].(string)
 	if actor == "" {
 		return "", nil, "", false
@@ -68,7 +69,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 		// A Mastodon favourite is the default heart — the only reaction the
 		// Fediverse side can express.
 		return routePostReact, reactionEvent{
-			TweetId: tweetID, UserId: owner, OwnerId: bridgedUserID(actor),
+			TweetId: tweetID, UserId: owner, OwnerId: g.bridgedUser(ctx, actor),
 			Emoji: defaultReaction,
 		}, owner, true
 
@@ -77,7 +78,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 		if !ok {
 			return "", nil, "", false
 		}
-		by := bridgedUserID(actor)
+		by := g.bridgedUser(ctx, actor)
 		return routePostRetweet, tweet{
 			Id:          tweetID,
 			RootId:      tweetID,
@@ -106,12 +107,12 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 				if stripped, ok := stripQuoteFallback(text); ok && stripped != "" {
 					text = stripped
 				}
-				by := bridgedUserID(actor)
+				by := g.bridgedUser(ctx, actor)
 				return routePostRetweet, tweet{
 					Id:            tweetID,
 					CreatedAt:     time.Now(),
 					UserId:        by,
-					Username:      handleFromActorURL(actor),
+					Username:      g.canonicalHandle(ctx, actor),
 					Text:          text,
 					RetweetedBy:   &by,
 					QuotedTweetId: &tweetID,
@@ -139,8 +140,8 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 			ParentUserId: &powner,
 			RootId:       parentID,
 			Text:         text,
-			UserId:       bridgedUserID(actor),
-			Username:     handleFromActorURL(actor),
+			UserId:       g.bridgedUser(ctx, actor),
+			Username:     g.canonicalHandle(ctx, actor),
 		}, powner, true
 
 	case typeUndo:
@@ -155,7 +156,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 				return "", nil, "", false
 			}
 			return routePostUnfollow, newFollowEvent{
-				FollowerId: bridgedUserID(actor), FollowingId: owner,
+				FollowerId: g.bridgedUser(ctx, actor), FollowingId: owner,
 			}, owner, true
 		case typeLike:
 			owner, tweetID, ok := g.parseLocalStatus(stringField(obj, keyObject))
@@ -164,7 +165,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 			}
 			// Unreact drops whatever emoji the reactor had, so it carries none.
 			return routePostUnreact, reactionEvent{
-				TweetId: tweetID, UserId: owner, OwnerId: bridgedUserID(actor),
+				TweetId: tweetID, UserId: owner, OwnerId: g.bridgedUser(ctx, actor),
 			}, owner, true
 		case typeAnnounce:
 			owner, tweetID, ok := g.parseLocalStatus(stringField(obj, keyObject))
@@ -174,7 +175,7 @@ func (g *gateway) translateInbound(raw map[string]any) (string, any, string, boo
 			// The event carries no local user (only the boosted tweet), but the
 			// owner of the boosted status still picks the network to undo it in.
 			return routePostUnretweet, unretweetEvent{
-				TweetId: tweetID, RetweeterId: bridgedUserID(actor),
+				TweetId: tweetID, RetweeterId: g.bridgedUser(ctx, actor),
 			}, owner, true
 		}
 	}
@@ -226,6 +227,15 @@ func ingestedNoteID(note map[string]any) string {
 // profile instead of showing a raw "ap:<base64url>" id. The encoded actor url is
 // the fallback for an actor url no handle can be derived from. (The follow graph
 // keeps using encodeActorID: the gateway decodes those ids back to inboxes.)
+// bridgedUser is bridgedUserID with the handle resolved canonically, for the
+// ids that are written into Warpnet and must stay resolvable afterwards.
+func (g *gateway) bridgedUser(ctx context.Context, actorURL string) string {
+	if handle := g.canonicalHandle(ctx, actorURL); strings.Contains(handle, "@") {
+		return handle
+	}
+	return encodeActorID(actorURL)
+}
+
 func bridgedUserID(actorURL string) string {
 	handle := handleFromActorURL(actorURL)
 	if !strings.Contains(handle, "@") {
@@ -246,5 +256,5 @@ func handleFromActorURL(actorURL string) string {
 	if name == "" || name == "." || name == "/" {
 		return actorURL
 	}
-	return name + "@" + u.Host
+	return name + "@" + canonicalHost(u.Host)
 }

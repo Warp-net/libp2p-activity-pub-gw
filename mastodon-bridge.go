@@ -46,6 +46,8 @@ import (
 
 	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
+	"github.com/hashicorp/golang-lru/v2/expirable"
+	log "github.com/sirupsen/logrus"
 )
 
 // apTransport is the ActivityPub HTTP surface the bridge needs; *gateway
@@ -53,6 +55,8 @@ import (
 type apTransport interface {
 	apGetJSON(ctx context.Context, rawURL, accept string) (map[string]any, error)
 	resolveActorID(ctx context.Context, id string) (string, error)
+	canonicalHandle(ctx context.Context, actorURL string) string
+	rememberHandle(actorURL, handle string)
 	apGetArray(ctx context.Context, rawURL, accept string) ([]any, error)
 	fetchActor(ctx context.Context, actorURL string) (map[string]any, error)
 	remoteInbox(ctx context.Context, actorURL string) (string, error)
@@ -66,10 +70,96 @@ type apTransport interface {
 type mastodonBridge struct {
 	ap     apTransport
 	nodeID string // gateway peer id stamped onto bridged users
+
+	// refs remembers the Mastodon REST status a canonical note url was read as.
+	// A status read from a mirror is reachable only under the mirror's own id,
+	// which the page that produced it hands out alongside the uri and nothing
+	// else ever would — without it a mirrored thread could not be opened.
+	refs *expirable.LRU[string, statusRef]
+
+	// misses remembers that a host has no answer for an account, so a REST API
+	// that is not there (Threads 404s every /api/v1 path) and a mirror that does
+	// not know the account are each probed once rather than on every render —
+	// the client re-polls every followed handle every 75s.
+	misses *expirable.LRU[string, struct{}]
 }
 
+// statusRef locates a status on a Mastodon REST API: the instance serving it and
+// its id there.
+type statusRef struct{ host, id string }
+
+const (
+	restRefsSize = 4096
+	restRefsTTL  = 30 * time.Minute
+	restMissSize = 2048
+	restMissTTL  = 10 * time.Minute
+)
+
 func newMastodonBridge(ap apTransport, nodeID string) *mastodonBridge {
-	return &mastodonBridge{ap: ap, nodeID: nodeID}
+	return &mastodonBridge{
+		ap: ap, nodeID: nodeID,
+		refs:   expirable.NewLRU[string, statusRef](restRefsSize, nil, restRefsTTL),
+		misses: expirable.NewLRU[string, struct{}](restMissSize, nil, restMissTTL),
+	}
+}
+
+func (b *mastodonBridge) rememberRef(uri, host, id string) {
+	if b.refs == nil || uri == "" || host == "" || id == "" {
+		return
+	}
+	b.refs.Add(uri, statusRef{host: host, id: id})
+}
+
+// restRef locates the Mastodon REST status representing a note: the copy on the
+// instance it was actually read from when one was seen, otherwise the status on
+// the note's own host.
+func (b *mastodonBridge) restRef(noteURL string) (statusRef, bool) {
+	if b.refs != nil {
+		if r, ok := b.refs.Get(noteURL); ok {
+			return r, true
+		}
+	}
+	host, id, ok := restStatusRef(noteURL)
+	return statusRef{host: host, id: id}, ok
+}
+
+// restAccount resolves a handle to its account object on apiHost's Mastodon REST
+// API, always naming the full name@instance acct so a mirror answers for the
+// remote account and not a local namesake. A host that does not answer for the
+// account is remembered for a while (see misses).
+func (b *mastodonBridge) restAccount(ctx context.Context, handle, apiHost string) (map[string]any, bool) {
+	name, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	if !ok || name == "" || instance == "" {
+		return nil, false
+	}
+	acct := name + "@" + instance
+	key := apiHost + " " + acct
+	if b.misses != nil {
+		if _, missed := b.misses.Get(key); missed {
+			return nil, false
+		}
+	}
+	acc, err := b.ap.apGetJSON(ctx, "https://"+apiHost+"/api/v1/accounts/lookup?acct="+url.QueryEscape(acct), "application/json")
+	if err != nil || asString(acc["id"]) == "" {
+		if b.misses != nil {
+			b.misses.Add(key, struct{}{})
+		}
+		return nil, false
+	}
+	b.rememberAccountHandle(acc)
+	return acc, true
+}
+
+// rememberAccountHandle records a REST account's actor url and handle together.
+// It is the cheap way to name an actor served under an opaque id: the pairing is
+// right there in every account object, where reading it off the actor itself
+// would mean a signed fetch the origin can refuse.
+func (b *mastodonBridge) rememberAccountHandle(acc map[string]any) {
+	uri, handle := asString(acc["uri"]), asString(acc["acct"])
+	if uri == "" || !strings.Contains(handle, "@") {
+		return
+	}
+	b.ap.rememberHandle(uri, handle)
 }
 
 // resolveHandle resolves "name@instance" to its actor URL via WebFinger. An
@@ -128,6 +218,87 @@ func (g *gateway) resolveActorID(ctx context.Context, handle string) (string, er
 	return "", fmt.Errorf("mastodon: webfinger %s: no self link", handle)
 }
 
+// canonicalHandle resolves an actor url to the handle Warpnet stores as the user
+// id. The url alone is not always enough: Threads serves some actors under a
+// numeric id (…/ap/users/17841452547050663/) that its own WebFinger then refuses
+// to resolve, so a handle read off the path would be a dead id — nothing could
+// ever turn it back into an actor url. The actor document carries
+// preferredUsername, which is the local part WebFinger does answer for.
+//
+// Only an opaque local part is dereferenced, so an ordinary handle costs no
+// fetch; on the inbound path the actor was just fetched to verify the signature,
+// so even that one is served from cache. A failed fetch degrades to the
+// url-derived handle rather than dropping the activity.
+func (g *gateway) canonicalHandle(ctx context.Context, actorURL string) string {
+	naive := handleFromActorURL(actorURL)
+	if !opaqueLocalPart(naive) {
+		return naive
+	}
+	u, perr := url.Parse(actorURL)
+	if perr != nil || u.Host == "" {
+		return naive
+	}
+	if g.handles != nil {
+		if handle, ok := g.handles.Get(actorURL); ok {
+			return handle
+		}
+	}
+	// A Mastodon-family host names the account behind an opaque id over its
+	// public REST API, unauthenticated and in a fraction of the time a signed
+	// actor fetch takes. It is tried first because the actor fetch needs our own
+	// actor to be dereferenceable by the peer, and a peer in secure mode refuses
+	// it outright when it is not.
+	opaque := path.Base(strings.TrimRight(u.Path, "/"))
+	if handle := g.restHandleByID(ctx, u.Host, opaque); handle != "" {
+		g.rememberHandle(actorURL, handle)
+		return handle
+	}
+	m, err := g.fetchActor(ctx, actorURL)
+	if err != nil {
+		log.Warnf("mastodon: canonical handle for %s: %v", actorURL, err)
+		return naive
+	}
+	name := asString(m["preferredUsername"])
+	if name == "" {
+		return naive
+	}
+	handle := name + "@" + canonicalHost(u.Host)
+	g.rememberHandle(actorURL, handle)
+	return handle
+}
+
+// restHandleByID names the account an opaque actor id belongs to through the
+// host's Mastodon REST API. Empty when the host serves none (Threads 404s) or
+// does not know the id.
+func (g *gateway) restHandleByID(ctx context.Context, host, id string) string {
+	if host == "" || id == "" || id == "." || id == "/" {
+		return ""
+	}
+	m, err := g.apGetJSON(ctx, "https://"+host+"/api/v1/accounts/"+url.PathEscape(id), "application/json")
+	if err != nil {
+		return ""
+	}
+	acct := asString(m["acct"])
+	if acct == "" {
+		return ""
+	}
+	if strings.Contains(acct, "@") {
+		return acct // a remote account the host knows, already a full handle
+	}
+	return acct + "@" + canonicalHost(host)
+}
+
+// rememberHandle records an actor url -> handle pairing learned elsewhere, so
+// canonicalHandle can answer without dereferencing the actor. It matters for
+// Threads: it serves some actors under an opaque id and gates every fetch behind
+// a signature it is free to reject, and a mirror hands out the pairing anyway.
+func (g *gateway) rememberHandle(actorURL, handle string) {
+	if g.handles == nil || actorURL == "" || handle == "" {
+		return
+	}
+	g.handles.Add(actorURL, handle)
+}
+
 // --- reads (Mastodon -> Warpnet) ---
 
 // GetUser resolves a handle to a full profile including follower/following/
@@ -143,6 +314,38 @@ func (b *mastodonBridge) GetUserBrief(ctx context.Context, handle string) (user,
 }
 
 func (b *mastodonBridge) getUser(ctx context.Context, handle string, withCounts bool) (user, error) {
+	if mirrorFirst(handle) {
+		if mu, ok := b.mirrorUser(ctx, handle); ok {
+			return mu, nil
+		}
+	}
+	// A list context skips the three collection fetches, which leaves the counts
+	// at zero — and the asking node stores whatever it is handed, so those zeros
+	// land on top of the real numbers and the profile reads "0 Followers" until
+	// something refreshes it. The account's own REST API carries the profile and
+	// its counts in the single request the brief path already budgets for, so
+	// nothing is skipped and nothing is zeroed.
+	if !withCounts {
+		if hu, ok := b.hostUser(ctx, handle); ok {
+			return hu, nil
+		}
+	}
+	u, err := b.apUser(ctx, handle, withCounts)
+	if err == nil {
+		return u, nil
+	}
+	// The account's own server did not answer — Threads hides an actor behind a
+	// signed fetch it can refuse, and its collections carry no members anyway.
+	// An instance that federates with it holds a copy of the profile, and its
+	// counts in the same single request where ActivityPub needs three more.
+	if mu, ok := b.mirrorUser(ctx, handle); ok {
+		return mu, nil
+	}
+	return user{}, err
+}
+
+// apUser reads a profile from the account's own server over ActivityPub.
+func (b *mastodonBridge) apUser(ctx context.Context, handle string, withCounts bool) (user, error) {
 	actorURL, err := b.resolveHandle(ctx, handle)
 	if err != nil {
 		return user{}, err
@@ -215,7 +418,9 @@ func (b *mastodonBridge) GetTweetsOrReplies(ctx context.Context, ev getAllTweets
 // GetTweets renders a remote actor's timeline as Warpnet tweets. Mastodon-family
 // instances serve a full status page (counts, boosts, media inline) from one
 // REST call, avoiding the per-item dereferences the AP outbox needs; others fall
-// back to the outbox. cursor, when set, continues whichever source produced it.
+// back to the outbox, and an account whose own server serves neither is read
+// from a mirror (mirrorTweets). cursor, when set, continues whichever source
+// produced it.
 func (b *mastodonBridge) GetTweets(ctx context.Context, handle string, cursor *string) (tweetsResponse, error) {
 	if pc := pageCursor(cursor); pc != "" {
 		if isRESTStatusesURL(pc) {
@@ -224,10 +429,122 @@ func (b *mastodonBridge) GetTweets(ctx context.Context, handle string, cursor *s
 		}
 		return b.apTweets(ctx, handle, cursor)
 	}
+	if mirrorFirst(handle) {
+		if mirrored, ok := b.mirrorTweets(ctx, handle); ok {
+			return mirrored, nil
+		}
+	}
 	if resp, ok := b.restTweets(ctx, handle); ok {
 		return resp, nil
 	}
-	return b.apTweets(ctx, handle, cursor)
+	resp, err := b.apTweets(ctx, handle, cursor)
+	if err == nil && len(resp.Tweets) > 0 {
+		return resp, nil
+	}
+	// The account's own server yielded nothing: Threads serves no REST API and
+	// answers its outbox with a bare count, so this is the only reachable
+	// source. The mirror is a last resort, never a preference — an instance
+	// that does serve its own posts is always authoritative over a copy.
+	if mirrored, ok := b.mirrorTweets(ctx, handle); ok {
+		return mirrored, nil
+	}
+	return resp, err
+}
+
+// defaultMirrorHost is the instance asked for posts an account's own server will
+// not serve. It is the one Warpnet already seeds as its entry into the Fediverse
+// (warpnet's mastodon.EntryHandle), so the deployment depends on no new third
+// party; GATEWAY_AP_MIRROR repoints it, and an empty value switches the fallback
+// off entirely.
+const defaultMirrorHost = "mastodon.social"
+
+func mirrorHost() string { return envOr("GATEWAY_AP_MIRROR", defaultMirrorHost) }
+
+// mirrorTweets reads a handle's posts from the mirror instance rather than the
+// account's own. A Mastodon instance that federates with the account holds its
+// posts and serves them over REST, and every status carries the canonical uri on
+// the account's own server — so reads come from the copy while replies, likes
+// and follows still go to the real thing.
+//
+// ok is false when no mirror is configured, when the mirror is the account's own
+// instance (restTweets already asked it), or when the mirror does not know the
+// account: it only holds accounts someone there follows, which is the standing
+// limit of this path.
+// mirrorFirst reports whether a handle's own server is known not to serve its
+// posts or profile, so the mirror is asked before it rather than after. Threads
+// answers its outbox and its follow collections with bare counts and serves no
+// REST API: going to the origin first costs five requests and six seconds to
+// learn nothing, and hands back an avatar url on Meta's CDN that expires within
+// days, where the mirror's copy is stable. The origin stays the fallback.
+func mirrorFirst(handle string) bool {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	return ok && isThreadsHost(instance)
+}
+
+// hollowFollowCollections reports whether a handle's server answers its
+// follower and following collections with a bare count and no members. Threads
+// does, and unlike its posts this cannot be read from a mirror either: an
+// instance that federates with it holds the account but not its graph, and
+// answers both REST endpoints with an empty array. Measured against the live
+// gateway, asking the origin costs three seconds per tab to return nothing, so
+// the only thing left to fix is not to ask. The counts still show — those come
+// from the profile, not from here.
+func hollowFollowCollections(handle string) bool {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	return ok && isThreadsHost(instance)
+}
+
+func (b *mastodonBridge) mirrorTweets(ctx context.Context, handle string) (tweetsResponse, bool) {
+	mirror, ok := mirrorFor(handle)
+	if !ok {
+		return tweetsResponse{}, false
+	}
+	return b.restTweetsFrom(ctx, handle, mirror)
+}
+
+// mirrorFor names the instance to ask about a handle when its own server will
+// not answer. There is none when the fallback is switched off or when the mirror
+// is the account's own instance — that one has already been asked.
+func mirrorFor(handle string) (string, bool) {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	if !ok || instance == "" {
+		return "", false
+	}
+	mirror := mirrorHost()
+	if mirror == "" || strings.EqualFold(mirror, instance) {
+		return "", false
+	}
+	return mirror, true
+}
+
+// restUser reads a profile from apiHost's Mastodon REST API. The one request
+// carries the profile and its counts, where ActivityPub needs an actor fetch
+// plus a collection each for followers, followings and posts.
+func (b *mastodonBridge) restUser(ctx context.Context, handle, apiHost string) (user, bool) {
+	acc, ok := b.restAccount(ctx, handle, apiHost)
+	if !ok {
+		return user{}, false
+	}
+	return restAccountToUser(handle, acc, b.nodeID), true
+}
+
+// mirrorUser reads a profile from the mirror instance, under the same conditions
+// as mirrorTweets.
+func (b *mastodonBridge) mirrorUser(ctx context.Context, handle string) (user, bool) {
+	mirror, ok := mirrorFor(handle)
+	if !ok {
+		return user{}, false
+	}
+	return b.restUser(ctx, handle, mirror)
+}
+
+// hostUser reads a profile from the account's own instance.
+func (b *mastodonBridge) hostUser(ctx context.Context, handle string) (user, bool) {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	if !ok || instance == "" {
+		return user{}, false
+	}
+	return b.restUser(ctx, handle, instance)
 }
 
 // isRESTStatusesURL reports whether a pagination cursor points at the Mastodon
@@ -236,26 +553,33 @@ func isRESTStatusesURL(u string) bool {
 	return strings.Contains(u, "/api/v1/accounts/") && strings.Contains(u, "/statuses")
 }
 
-// restTweets loads a handle's first status page over the Mastodon REST API,
-// resolving the account id via /accounts/lookup. ok is false for non-Mastodon
-// instances, so the caller falls back to the AP outbox.
+// restTweets loads a handle's first status page from the account's own instance
+// over the Mastodon REST API. ok is false for non-Mastodon instances, so the
+// caller falls back to the AP outbox.
 func (b *mastodonBridge) restTweets(ctx context.Context, handle string) (tweetsResponse, bool) {
-	name, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
-	if !ok || name == "" || instance == "" {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	if !ok || instance == "" {
 		return tweetsResponse{}, false
 	}
-	look, err := b.ap.apGetJSON(ctx, "https://"+instance+"/api/v1/accounts/lookup?acct="+url.QueryEscape(name+"@"+instance), "application/json")
-	if err != nil {
+	return b.restTweetsFrom(ctx, handle, instance)
+}
+
+// restTweetsFrom loads a handle's first status page over the Mastodon REST API
+// of apiHost, resolving the account id via /accounts/lookup. apiHost is the
+// account's own instance, or a mirror that federates with it. The lookup always
+// names the full name@instance acct, so a mirror answers for the remote account
+// and not for a local namesake. ok is false when apiHost serves no Mastodon REST
+// API or does not know the account.
+func (b *mastodonBridge) restTweetsFrom(ctx context.Context, handle, apiHost string) (tweetsResponse, bool) {
+	acc, ok := b.restAccount(ctx, handle, apiHost)
+	if !ok {
 		return tweetsResponse{}, false
 	}
-	accID := asString(look["id"])
-	if accID == "" {
-		return tweetsResponse{}, false
-	}
+	accID := asString(acc["id"])
 	// exclude_replies mirrors warpnet's own profile timeline, which is served
 	// from the author's timeline keyspace and never contains replies; the Posts
 	// tab must show only top-level posts (thread replies come from GetReplies).
-	return b.restTweetsPage(ctx, handle, "https://"+instance+"/api/v1/accounts/"+accID+"/statuses?limit=40&exclude_replies=true")
+	return b.restTweetsPage(ctx, handle, "https://"+apiHost+"/api/v1/accounts/"+accID+"/statuses?limit=40&exclude_replies=true")
 }
 
 // restTweetsPage fetches one REST status page and maps it, deriving the next
@@ -278,7 +602,12 @@ func (b *mastodonBridge) restTweetsPage(ctx context.Context, handle, pageURL str
 		}
 		if sid := asString(s["id"]); sid != "" {
 			lastID = sid
+			// The page is the only place a status's canonical uri and its id on
+			// this instance appear together; a mirrored thread is unreachable
+			// without the pairing.
+			b.rememberRef(asString(s["uri"]), host, sid)
 		}
+		b.rememberAccountHandle(asMap(s["account"]))
 		// exclude_replies leaves self-replies (thread continuations) in the
 		// page; a Warpnet profile carries only top-level posts, so a reply
 		// must never surface as a standalone tweet — it stays reachable
@@ -395,7 +724,7 @@ func (b *mastodonBridge) activityToTweet(ctx context.Context, handle string, obj
 		if err != nil {
 			return tweet{}, false
 		}
-		t, ok := noteToTweet(handleFromActorURL(asString(bm["attributedTo"])), bm)
+		t, ok := noteToTweet(b.ap.canonicalHandle(ctx, asString(bm["attributedTo"])), bm)
 		if ok {
 			by := handle
 			t.RetweetedBy = &by
@@ -429,7 +758,7 @@ func (b *mastodonBridge) fillQuotedAuthor(ctx context.Context, t *tweet) {
 		m = inner
 	}
 	if author := asString(m["attributedTo"]); author != "" {
-		h := handleFromActorURL(author)
+		h := b.ap.canonicalHandle(ctx, author)
 		t.QuotedUserId = &h
 	}
 }
@@ -439,9 +768,9 @@ func (b *mastodonBridge) fillQuotedAuthor(ctx context.Context, t *tweet) {
 // back to dereferencing the AP Note.
 func (b *mastodonBridge) GetTweet(ctx context.Context, noteURL string) (tweet, error) {
 	noteURL = strings.TrimPrefix(noteURL, domain.RetweetPrefix)
-	if host, id, ok := restStatusRef(noteURL); ok {
-		if m, err := b.ap.apGetJSON(ctx, "https://"+host+"/api/v1/statuses/"+id, "application/json"); err == nil {
-			if t, ok := restStatusToTweet(host, m); ok {
+	if ref, ok := b.restRef(noteURL); ok {
+		if m, err := b.ap.apGetJSON(ctx, "https://"+ref.host+"/api/v1/statuses/"+ref.id, "application/json"); err == nil {
+			if t, ok := restStatusToTweet(ref.host, m); ok {
 				return t, nil
 			}
 		}
@@ -458,7 +787,7 @@ func (b *mastodonBridge) apTweet(ctx context.Context, noteURL string) (tweet, er
 	if inner := asMap(m["object"]); inner != nil {
 		m = inner
 	}
-	t, ok := noteToTweet(handleFromActorURL(asString(m["attributedTo"])), m)
+	t, ok := noteToTweet(b.ap.canonicalHandle(ctx, asString(m["attributedTo"])), m)
 	if ok {
 		b.fillQuotedAuthor(ctx, &t)
 	}
@@ -493,10 +822,11 @@ const maxReplies = 50
 // and flattens its descendants into replies. ok is false when the instance is
 // not Mastodon-compatible (no /context), so the caller falls back to AP.
 func (b *mastodonBridge) contextReplies(ctx context.Context, noteURL string) (tweetsResponse, bool) {
-	host, id, ok := restStatusRef(noteURL)
+	ref, ok := b.restRef(noteURL)
 	if !ok {
 		return tweetsResponse{}, false
 	}
+	host, id := ref.host, ref.id
 	ctxURL := "https://" + host + "/api/v1/statuses/" + id + "/context"
 	m, err := b.ap.apGetJSON(ctx, ctxURL, "application/json")
 	if err != nil {
@@ -514,10 +844,16 @@ func (b *mastodonBridge) contextReplies(ctx context.Context, noteURL string) (tw
 			break
 		}
 		s := asMap(it)
+		if s == nil {
+			continue
+		}
+		b.rememberRef(asString(s["uri"]), host, asString(s["id"]))
+		b.rememberAccountHandle(asMap(s["account"]))
 		// The context lists the note's whole subtree flattened; only direct
 		// children are this note's replies — deeper levels are served when
-		// the client walks the thread one parent at a time.
-		if s == nil || asString(s["in_reply_to_id"]) != id {
+		// the client walks the thread one parent at a time, and the pairing
+		// remembered above is what lets it.
+		if asString(s["in_reply_to_id"]) != id {
 			continue
 		}
 		if t, ok := restReplyToTweet(host, s, noteURL, idToURI); ok {
@@ -620,7 +956,7 @@ func restBaseTweet(host string, s map[string]any) (tweet, bool) {
 		UserId:    handle,
 		Username:  handle,
 		CreatedAt: parseAPTime(asString(s["created_at"])),
-		Network:   mastodonNetwork,
+		Network:   networkOfHandle(handle),
 	}
 	for _, a := range asSlice(s["media_attachments"]) {
 		att := asMap(a)
@@ -770,7 +1106,7 @@ func (b *mastodonBridge) resolveReplyItems(ctx context.Context, items []any) []t
 			if note == nil {
 				return
 			}
-			if t, good := noteToTweet(handleFromActorURL(asString(note["attributedTo"])), note); good {
+			if t, good := noteToTweet(b.ap.canonicalHandle(ctx, asString(note["attributedTo"])), note); good {
 				b.fillQuotedAuthor(ctx, &t)
 				out[i], ok[i] = t, true
 			}
@@ -797,8 +1133,8 @@ func (b *mastodonBridge) resolveReplyItems(ctx context.Context, items []any) []t
 // local store before handing the stats to its client.
 func (b *mastodonBridge) GetTweetStats(ctx context.Context, noteURL string) (event.TweetStatsResponse, error) {
 	noteURL = strings.TrimPrefix(noteURL, domain.RetweetPrefix)
-	if host, id, ok := restStatusRef(noteURL); ok {
-		if m, err := b.ap.apGetJSON(ctx, "https://"+host+"/api/v1/statuses/"+id, "application/json"); err == nil {
+	if ref, ok := b.restRef(noteURL); ok {
+		if m, err := b.ap.apGetJSON(ctx, "https://"+ref.host+"/api/v1/statuses/"+ref.id, "application/json"); err == nil {
 			if _, isStatus := m["replies_count"]; isStatus {
 				return tweetStats(noteURL,
 					numField(m["favourites_count"]),
@@ -866,6 +1202,9 @@ func (b *mastodonBridge) GetFollowings(ctx context.Context, handle string, curso
 // followList resolves the actor's follower/following collection to handles.
 // Instances that hide the member list yield an empty result.
 func (b *mastodonBridge) followList(ctx context.Context, handle string, cursor *string, field string) ([]string, string, error) {
+	if hollowFollowCollections(handle) {
+		return []string{}, "", nil
+	}
 	pageURL := pageCursor(cursor)
 	if pageURL == "" {
 		actorURL, err := b.resolveHandle(ctx, handle)
@@ -888,14 +1227,14 @@ func (b *mastodonBridge) followList(ctx context.Context, handle string, cursor *
 		if first := asString(page["first"]); first != "" && !hasItems {
 			pageURL = first
 		} else {
-			return b.dropSelfHandles(collectHandles(page)), asString(page["next"]), nil
+			return b.dropSelfHandles(b.collectHandles(ctx, page)), asString(page["next"]), nil
 		}
 	}
 	page, err := b.ap.apGetJSON(ctx, pageURL, contentTypeAP)
 	if err != nil {
 		return []string{}, "", nil //nolint:nilerr // hidden collection -> empty, not an error
 	}
-	return b.dropSelfHandles(collectHandles(page)), asString(page["next"]), nil
+	return b.dropSelfHandles(b.collectHandles(ctx, page)), asString(page["next"]), nil
 }
 
 // dropSelfHandles removes handles hosted by the gateway. A Warpnet user who

@@ -31,6 +31,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -60,6 +61,7 @@ type nodeFollowerStore struct {
 // of older "ap:" ids stays an implementation detail behind this.
 type actorResolver interface {
 	resolveActorID(ctx context.Context, id string) (string, error)
+	canonicalHandle(ctx context.Context, actorURL string) string
 }
 
 const (
@@ -88,9 +90,26 @@ func nodeResponseError(bt []byte) error {
 	return fmt.Errorf("node: %d %s", possibleError.Code, possibleError.Message)
 }
 
+// followerID is the Warpnet id a Fediverse follower is stored under. It is
+// resolved through the actor document where the url alone would yield an
+// unresolvable handle (see gateway.canonicalHandle); the store's own interface
+// carries no context, so the lookup gets the same bounded one a handle
+// resolution gets elsewhere.
+func (s nodeFollowerStore) followerID(actorURL string) string {
+	if s.resolver == nil {
+		return bridgedUserID(actorURL)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resolveFollowerTimeout)
+	defer cancel()
+	if handle := s.resolver.canonicalHandle(ctx, actorURL); strings.Contains(handle, "@") {
+		return handle
+	}
+	return bridgedUserID(actorURL)
+}
+
 func (s nodeFollowerStore) Add(localUser, actorURL string) error {
 	bt, err := s.req.requestUser(localUser, routePostFollow, newFollowEvent{
-		FollowerId:  bridgedUserID(actorURL),
+		FollowerId:  s.followerID(actorURL),
 		FollowingId: localUser,
 	})
 	if err != nil {

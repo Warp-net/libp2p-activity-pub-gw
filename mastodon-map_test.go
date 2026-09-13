@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -263,18 +264,20 @@ func TestStripQuoteFallback(t *testing.T) {
 }
 
 func TestCollectHandles(t *testing.T) {
-	got := collectHandles(map[string]any{"orderedItems": []any{
+	b, _, _ := newBridgeFixture(t)
+	ctx := context.Background()
+	got := b.collectHandles(ctx, map[string]any{"orderedItems": []any{
 		"https://m.example/users/bob", "https://o.example/@ann", 42,
 	}})
 	if !reflect.DeepEqual(got, []string{"bob@m.example", "ann@o.example"}) {
 		t.Fatalf("orderedItems: %v", got)
 	}
 	// Servers that use "items" instead of "orderedItems" must work too.
-	got = collectHandles(map[string]any{"items": []any{"https://m.example/users/carol"}})
+	got = b.collectHandles(ctx, map[string]any{"items": []any{"https://m.example/users/carol"}})
 	if !reflect.DeepEqual(got, []string{"carol@m.example"}) {
 		t.Fatalf("items: %v", got)
 	}
-	if got := collectHandles(map[string]any{}); len(got) != 0 {
+	if got := b.collectHandles(ctx, map[string]any{}); len(got) != 0 {
 		t.Fatalf("empty page: %v", got)
 	}
 }
@@ -351,5 +354,91 @@ func TestLooseAccessors(t *testing.T) {
 	}
 	if got := asSlice([]any{1}); len(got) != 1 {
 		t.Fatalf("asSlice = %v", got)
+	}
+}
+
+// TestNetworkOfHandle pins the network tag to the account's own instance.
+// Threads spells itself three ways — the handle domain, the www. actor host and
+// the threads.com web urls — and some accounts resolve to a numeric local part
+// instead of their username, so the tag can only follow the domain.
+func TestNetworkOfHandle(t *testing.T) {
+	cases := map[string]string{
+		"mosseri@threads.net":           threadsNetwork,
+		"mosseri@www.threads.net":       threadsNetwork,
+		"mosseri@THREADS.NET":           threadsNetwork,
+		"@mosseri@threads.com":          threadsNetwork,
+		"17841452547050663@threads.net": threadsNetwork,
+		"bob@mastodon.social":           mastodonNetwork,
+		"bob@notthreads.net":            mastodonNetwork,
+		"bob":                           mastodonNetwork,
+	}
+	for handle, want := range cases {
+		if got := networkOfHandle(handle); got != want {
+			t.Errorf("networkOfHandle(%q) = %q, want %q", handle, got, want)
+		}
+	}
+	if !isBridgedNetwork(threadsNetwork) || !isBridgedNetwork(mastodonNetwork) {
+		t.Error("both bridged networks must count as bridged")
+	}
+	if isBridgedNetwork("") || isBridgedNetwork("warpnet") {
+		t.Error("a Warpnet network must not count as bridged")
+	}
+}
+
+// TestCanonicalHostCollapsesThreadsSpellings: only one spelling resolves, so a
+// handle built from an actor url has to be collapsed onto it.
+func TestCanonicalHostCollapsesThreadsSpellings(t *testing.T) {
+	cases := map[string]string{
+		"https://www.threads.net/ap/users/mosseri/": "mosseri@threads.net",
+		"https://threads.net/ap/users/mosseri/":     "mosseri@threads.net",
+		"https://www.threads.com/ap/users/mosseri/": "mosseri@threads.net",
+		"https://mastodon.social/users/bob":         "bob@mastodon.social",
+		"https://m.example/@bob":                    "bob@m.example",
+	}
+	for actorURL, want := range cases {
+		if got := handleFromActorURL(actorURL); got != want {
+			t.Errorf("handleFromActorURL(%q) = %q, want %q", actorURL, got, want)
+		}
+	}
+}
+
+func TestOpaqueLocalPart(t *testing.T) {
+	cases := map[string]bool{
+		"17841452547050663@threads.net": true,
+		"mosseri@threads.net":           false,
+		"bob2@mastodon.social":          false,
+		"@mastodon.social":              false,
+		"nohandle":                      false,
+	}
+	for handle, want := range cases {
+		if got := opaqueLocalPart(handle); got != want {
+			t.Errorf("opaqueLocalPart(%q) = %v, want %v", handle, got, want)
+		}
+	}
+}
+
+func TestRestAccountToUser(t *testing.T) {
+	u := restAccountToUser("bob@threads.net", map[string]any{
+		"username": "bob", "display_name": "Bob", "note": "<p>hi</p>",
+		"avatar":          "https://files.example/avatars/bob.jpg",
+		"header":          "https://files.example/headers/original/missing.png",
+		"url":             "https://www.threads.net/@bob",
+		"created_at":      "2023-12-14T00:00:00.000Z",
+		"followers_count": float64(12), "following_count": float64(3), "statuses_count": float64(7),
+	}, "node-1")
+	if u.Id != "bob@threads.net" || u.Username != "Bob" || u.Bio != "hi" {
+		t.Fatalf("user = %+v", u)
+	}
+	if u.Network != threadsNetwork {
+		t.Errorf("network = %q, want %q", u.Network, threadsNetwork)
+	}
+	if u.AvatarKey == "" || u.BackgroundImageKey != "" {
+		t.Errorf("images = %q / %q, want the avatar kept and the placeholder dropped", u.AvatarKey, u.BackgroundImageKey)
+	}
+	if u.FollowersCount != 12 || u.FollowingsCount != 3 || u.TweetsCount != 7 {
+		t.Errorf("counts = %d/%d/%d", u.FollowersCount, u.FollowingsCount, u.TweetsCount)
+	}
+	if u.Website == nil || *u.Website != "https://www.threads.net/@bob" {
+		t.Errorf("website = %v", u.Website)
 	}
 }

@@ -32,9 +32,11 @@ package main
 // dependency on the gateway, so they are trivially unit-testable.
 
 import (
+	"context"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -45,6 +47,115 @@ import (
 // mastodonNetwork tags bridged users/tweets so Warpnet treats them as a foreign
 // network; mirrors warpnet's own "mastodon" User.Network value on the wire.
 const mastodonNetwork = "mastodon"
+
+// threadsNetwork tags accounts and posts bridged in from Meta's Threads. They
+// travel the same ActivityPub path as Mastodon ones, but Warpnet stores the
+// network per account and the two servers behave differently enough to be worth
+// telling apart: Threads serves no REST API and no browsable outbox, so its
+// posts are read through a mirror (see mastodonBridge.mirrorTweets).
+const threadsNetwork = "threads"
+
+// threadsHost is the one spelling Threads' own WebFinger answers for, and so
+// the one every handle is canonicalized onto.
+const threadsHost = "threads.net"
+
+// isThreadsHost reports whether an instance host is Threads. It spells itself
+// several ways — the handle domain is threads.net, actor urls carry the www.
+// host, and the web urls moved to threads.com — so the tag is decided on the
+// registrable name alone.
+func isThreadsHost(host string) bool {
+	host = strings.TrimPrefix(strings.ToLower(host), "www.")
+	return host == threadsHost || host == "threads.com"
+}
+
+// opaqueLocalPart reports whether a handle's local part is an opaque id rather
+// than a username. Threads serves some actors under a numeric id
+// (…/ap/users/17841452547050663/) and then answers WebFinger for the username
+// only, 404ing that id — so the handle has to come from the actor document
+// instead of the url.
+func opaqueLocalPart(handle string) bool {
+	name, _, ok := strings.Cut(handle, "@")
+	if !ok || name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalHost is the spelling of an instance host a handle carries. Only the
+// canonical one resolves: Threads answers WebFinger for name@threads.net and
+// 404s the same account under any other spelling, so a handle built from an
+// actor url's host would be unresolvable half the time.
+func canonicalHost(host string) string {
+	if isThreadsHost(host) {
+		return threadsHost
+	}
+	return host
+}
+
+// networkOfHandle names the foreign network a bridged handle belongs to. It
+// follows the account's own instance and never the server the posts were read
+// from: a Threads account read through a Mastodon mirror is still on Threads.
+func networkOfHandle(handle string) string {
+	_, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
+	if ok && isThreadsHost(instance) {
+		return threadsNetwork
+	}
+	return mastodonNetwork
+}
+
+// isBridgedNetwork reports whether a Warpnet User.Network tag names a network
+// bridged in through this gateway rather than Warpnet itself.
+func isBridgedNetwork(network string) bool {
+	return network == mastodonNetwork || network == threadsNetwork
+}
+
+// restAccountToUser renders a Mastodon REST account as a Warpnet user — the
+// mirror's view of an account whose own server would not answer (see
+// mastodonBridge.mirrorUser). It carries the same fields actorToUser builds,
+// plus the counts that cost three extra collection fetches over ActivityPub, and
+// images the instance has already cached rather than links into the origin's CDN.
+func restAccountToUser(handle string, acc map[string]any, nodeID string) user {
+	name := asString(acc["display_name"])
+	if name == "" {
+		name = asString(acc["username"])
+	}
+	u := user{
+		Id:                 handle,
+		Username:           name,
+		Bio:                stripper.StripTags(asString(acc["note"])),
+		NodeId:             nodeID,
+		Network:            networkOfHandle(handle),
+		AvatarKey:          restImageURL(acc["avatar"]),
+		BackgroundImageKey: restImageURL(acc["header"]),
+		CreatedAt:          parseAPTime(asString(acc["created_at"])),
+		FollowersCount:     int64(numField(acc["followers_count"])),
+		FollowingsCount:    int64(numField(acc["following_count"])),
+		TweetsCount:        int64(numField(acc["statuses_count"])),
+	}
+	if u.CreatedAt.IsZero() {
+		u.CreatedAt = time.Now()
+	}
+	if site := asString(acc["url"]); site != "" {
+		u.Website = &site
+	}
+	return u
+}
+
+// restImageURL drops the placeholder Mastodon serves in place of an absent
+// avatar or header; passed on, it would paint a broken default over the
+// client's own.
+func restImageURL(v any) string {
+	u := asString(v)
+	if strings.Contains(u, "/missing.png") {
+		return ""
+	}
+	return u
+}
 
 // actorToUser renders an ActivityPub actor document as a Warpnet user. handle is
 // the WebFinger id (and the Warpnet user id); nodeID is the gateway peer that
@@ -59,7 +170,7 @@ func actorToUser(handle, actorURL string, m map[string]any, nodeID string) user 
 		Username:           name,
 		Bio:                stripper.StripTags(asString(m["summary"])),
 		NodeId:             nodeID,
-		Network:            mastodonNetwork,
+		Network:            networkOfHandle(handle),
 		AvatarKey:          asImageURL(m["icon"]),
 		BackgroundImageKey: asImageURL(m["image"]),
 		CreatedAt:          parseAPTime(asString(m["published"])),
@@ -98,7 +209,7 @@ func noteToTweet(authorHandle string, note map[string]any) (tweet, bool) {
 		UserId:    username,
 		Username:  username,
 		CreatedAt: parseAPTime(asString(note["published"])),
-		Network:   mastodonNetwork,
+		Network:   networkOfHandle(username),
 	}
 	if parent := asString(note["inReplyTo"]); parent != "" {
 		t.RootId = parent
@@ -242,15 +353,40 @@ func splitREPrefix(text string) (parentURL, rest string, ok bool) {
 }
 
 // collectHandles maps a collection page's actor-URL items to Fediverse handles.
-func collectHandles(page map[string]any) []string {
+// An item whose url carries an opaque id is named through its actor document:
+// a handle built from such a url resolves to nothing, so the row it produces
+// fails to load and silently disappears from the list. Threads serves its actors
+// that way, and so does Mastodon for accounts created after the switch — three
+// of the first six entries of a real following collection.
+//
+// Only the opaque ones cost a fetch (canonicalHandle), and they run concurrently:
+// a page holds a dozen items and one Threads actor alone answers in seconds.
+func (b *mastodonBridge) collectHandles(ctx context.Context, page map[string]any) []string {
 	items := asSlice(page["orderedItems"])
 	if len(items) == 0 {
 		items = asSlice(page["items"])
 	}
-	out := make([]string, 0, len(items))
-	for _, it := range items {
-		if u := asString(it); u != "" {
-			out = append(out, handleFromActorURL(u))
+	named := make([]string, len(items))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, it := range items {
+		u := asString(it)
+		if u == "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			named[i] = b.ap.canonicalHandle(ctx, u)
+		}()
+	}
+	wg.Wait()
+	out := make([]string, 0, len(named))
+	for _, h := range named {
+		if h != "" {
+			out = append(out, h)
 		}
 	}
 	return out
