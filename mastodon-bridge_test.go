@@ -1568,6 +1568,26 @@ func TestThreadsAsksTheMirrorFirst(t *testing.T) {
 	}
 }
 
+func TestGetUserCanonicalizesTheThreadsHost(t *testing.T) {
+	b, _, mirror := newBridgeFixture(t)
+	t.Setenv("GATEWAY_AP_MIRROR", mirror.host())
+
+	mirror.on("/api/v1/accounts/lookup", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("acct") != "someone@threads.net" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, "application/json", map[string]any{"id": "42", "username": "someone", "acct": "someone@threads.net"})
+	})
+
+	for _, handle := range []string{"someone@threads.com", "@someone@www.threads.com", "someone@www.threads.net"} {
+		u, err := b.GetUser(context.Background(), handle)
+		if err != nil || u.Id != "someone@threads.net" {
+			t.Fatalf("GetUser(%q) = %+v, err = %v; want the threads.net account", handle, u, err)
+		}
+	}
+}
+
 // TestCanonicalHandlePrefersRESTOverTheActor: naming an opaque actor through the
 // host's public REST API needs no signature, so it works against a peer in
 // secure mode that refuses our signed fetch — and costs a fraction of the time.
