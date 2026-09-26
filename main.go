@@ -69,7 +69,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.104"
+const gatewayVersion = "0.1.105"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000

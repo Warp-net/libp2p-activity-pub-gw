@@ -314,6 +314,9 @@ func (b *mastodonBridge) GetUserBrief(ctx context.Context, handle string) (user,
 }
 
 func (b *mastodonBridge) getUser(ctx context.Context, handle string, withCounts bool) (user, error) {
+	if name, host, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@"); ok {
+		handle = name + "@" + canonicalHost(host)
+	}
 	if mirrorFirst(handle) {
 		if mu, ok := b.mirrorUser(ctx, handle); ok {
 			return mu, nil
