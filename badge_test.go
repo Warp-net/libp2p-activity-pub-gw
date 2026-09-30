@@ -31,6 +31,20 @@ func TestHandleStatic(t *testing.T) {
 		}
 	})
 
+	t.Run("serves the sponsored teaser", func(t *testing.T) {
+		resp, err := http.Get(srv.URL + sponsoredTeaserPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		if ct := resp.Header.Get(headerContentType); !strings.HasPrefix(ct, "image/png") {
+			t.Fatalf("content-type = %q", ct)
+		}
+	})
+
 	t.Run("unknown static path is 404", func(t *testing.T) {
 		resp, err := http.Get(srv.URL + pathStatic + "nope.png")
 		if err != nil {
