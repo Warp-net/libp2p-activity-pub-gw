@@ -39,6 +39,10 @@ import (
 
 const asPublic = "https://www.w3.org/ns/activitystreams#Public"
 
+// sponsoredTeaserPath is the only thing a sponsored tweet federates with: its
+// content is for buyers, and a copy cached on the Fediverse can't be revoked.
+const sponsoredTeaserPath = pathStatic + "sponsored.png"
+
 // buildNote renders a Warpnet tweet as an ActivityPub Note authored by
 // localUser. The Note id is deterministic (.../statuses/{id}) so serveStatus
 // can resolve it back to the tweet without local storage.
@@ -63,6 +67,11 @@ func (g *gateway) buildNote(localUser string, t tweet) note {
 	// InReplyTo with the exact parent URL for a cross-author reply.
 	if parent := replyParentID(t); parent != "" {
 		n.InReplyTo = actorID + pathStatuses + parent
+	}
+	if t.IsSponsored() {
+		n.Content = ""
+		n.Attachment = []attachment{{Type: typeDocument, URL: g.baseURL() + sponsoredTeaserPath}}
+		return n
 	}
 	for _, key := range t.ImageKeys {
 		n.Attachment = append(n.Attachment, attachment{
