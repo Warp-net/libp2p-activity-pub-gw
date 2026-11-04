@@ -81,7 +81,8 @@ type mastodonBridge struct {
 	// that is not there (Threads 404s every /api/v1 path) and a mirror that does
 	// not know the account are each probed once rather than on every render —
 	// the client re-polls every followed handle every 75s.
-	misses *expirable.LRU[string, struct{}]
+	misses          *expirable.LRU[string, struct{}]
+	recommendations *expirable.LRU[string, usersResponse]
 }
 
 // statusRef locates a status on a Mastodon REST API: the instance serving it and
@@ -98,8 +99,9 @@ const (
 func newMastodonBridge(ap apTransport, nodeID string) *mastodonBridge {
 	return &mastodonBridge{
 		ap: ap, nodeID: nodeID,
-		refs:   expirable.NewLRU[string, statusRef](restRefsSize, nil, restRefsTTL),
-		misses: expirable.NewLRU[string, struct{}](restMissSize, nil, restMissTTL),
+		refs:            expirable.NewLRU[string, statusRef](restRefsSize, nil, restRefsTTL),
+		misses:          expirable.NewLRU[string, struct{}](restMissSize, nil, restMissTTL),
+		recommendations: expirable.NewLRU[string, usersResponse](32, nil, 5*time.Minute),
 	}
 }
 

@@ -61,6 +61,15 @@ are required:
 | --------------------------- | ----------------------------------------- | --------- |
 | `NODE_NETWORK`              | a non-default network, or several at once | `warpnet` |
 | `GATEWAY_DISABLE_<NETWORK>` | to switch one node off                    | on        |
+| `GATEWAY_DISCOVERY_HOST` | Mastodon instance supplying who-to-follow candidates; empty disables discovery | `mastodon.social` |
+
+Who-to-follow uses the instance's public `/api/v1/directory` (`order=active`,
+`local=false`), cached in memory for five minutes. These are discovery candidates,
+not personalized `/api/v2/suggestions`, which requires a Mastodon user's OAuth
+token. Warpnet nodes fetch candidates over the existing who-to-follow route and
+filter out the owner and accounts already followed. The gateway stores no profiles
+on disk. Nodes must include the gateway-discovery update to use this source;
+older nodes continue serving their locally known users.
 
 `NODE_NETWORK` takes one network or a comma-separated list
 (`warpnet,testnet`). Each name gets its own libp2p node in the one process, all
