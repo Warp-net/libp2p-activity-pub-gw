@@ -64,6 +64,10 @@ func TestWhoToFollowDirectoryFiltering(t *testing.T) {
 		map[string]any{"acct": "suspended", "suspended": true},
 		map[string]any{"acct": "moved", "moved": map[string]any{"acct": "elsewhere"}},
 		map[string]any{"acct": "owner@" + g.host},
+		map[string]any{"acct": "01KTRA1QJ8M2W7Y4ZB6C9D3E5F@another-gateway.example"},
+		map[string]any{"acct": "@invalid.example"},
+		map[string]any{"acct": "alice@"},
+		map[string]any{"acct": "alice@remote@example.com"},
 	})
 	resp, err := b.GetWhoToFollow(context.Background(), getAllUsersEvent{})
 	if err != nil || len(resp.Users) != 1 || resp.Users[0].Id != "alice@"+f.host() {
@@ -100,9 +104,11 @@ func TestNodeServerWhoToFollow(t *testing.T) {
 	fx := newNodeFixture(t)
 	t.Setenv("GATEWAY_DISCOVERY_HOST", fx.peer.host())
 	fx.peer.serveDoc("/api/v1/directory", "application/json", []any{map[string]any{"acct": "alice", "username": "Alice"}})
-	var resp usersResponse
-	fx.call(t, event.PUBLIC_GET_WHOTOFOLLOW, getAllUsersEvent{UserId: "warpnet-owner"}, &resp)
-	if len(resp.Users) != 1 || resp.Users[0].NodeId != fx.server.h.ID().String() {
-		t.Fatalf("response = %+v", resp)
+	for _, route := range []string{event.PUBLIC_GET_WHOTOFOLLOW, routeGetUsers} {
+		var resp usersResponse
+		fx.call(t, route, getAllUsersEvent{UserId: defaultOwnerHandle}, &resp)
+		if len(resp.Users) != 1 || resp.Users[0].NodeId != fx.server.h.ID().String() {
+			t.Fatalf("%s response = %+v", route, resp)
+		}
 	}
 }

@@ -76,6 +76,9 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			return b.GetUser(ctx, string(ev.UserId))
 		}),
 		routeGetUsers: wrapJSON(func(ctx context.Context, ev getAllUsersEvent) (any, error) {
+			if string(ev.UserId) == ownerHandle {
+				return b.GetWhoToFollow(ctx, ev)
+			}
 			u, err := b.GetUserBrief(ctx, string(ev.UserId)) // list context: skip count fetches
 			if err != nil {
 				return event.UsersResponse{}, nil //nolint:nilerr // unknown handle -> empty

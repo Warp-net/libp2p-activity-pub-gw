@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 )
 
 const (
@@ -62,8 +64,9 @@ func (b *mastodonBridge) GetWhoToFollow(ctx context.Context, ev getAllUsersEvent
 		if handle == "" || seen[handle] || acc["suspended"] == true || acc["moved"] != nil {
 			continue
 		}
-		_, instance, _ := strings.Cut(handle, "@")
-		if b.ap.isSelfHost(instance) {
+		name, instance, ok := strings.Cut(handle, "@")
+		_, nativeIDErr := ulid.ParseStrict(name)
+		if !ok || name == "" || instance == "" || strings.Contains(instance, "@") || nativeIDErr == nil || b.ap.isSelfHost(instance) {
 			continue
 		}
 		seen[handle] = true
