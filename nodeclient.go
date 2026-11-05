@@ -234,7 +234,10 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 		netLog(network).Warnf("nodeclient: dht bootstrap: %v", berr)
 	}
 	select {
-	case <-kdht.RefreshRoutingTable():
+	case rerr := <-kdht.RefreshRoutingTable():
+		if rerr != nil {
+			netLog(network).Warnf("nodeclient: dht refresh after bootstrap: %v", rerr)
+		}
 	case <-time.After(20 * time.Second):
 	case <-ctx.Done():
 	}
@@ -259,7 +262,10 @@ func (c *nodeClient) request(route string, payload any) ([]byte, error) {
 	peers := c.memberCandidates(route)
 	if len(peers) == 0 && c.dht != nil {
 		select { // routing table not populated yet — refresh and retry
-		case <-c.dht.RefreshRoutingTable():
+		case rerr := <-c.dht.RefreshRoutingTable():
+			if rerr != nil {
+				netLog(c.network).Warnf("nodeclient: dht refresh for %s: %v", route, rerr)
+			}
 		case <-time.After(15 * time.Second):
 		case <-ctx.Done():
 		}
