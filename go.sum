@@ -14,8 +14,8 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/Warp-net/libp2p-camouflage-transport v0.0.3 h1:rmkVl3+zHQqduXIAf6KEhM/4Y1eb1lXiIkHt4j7YgBY=
 github.com/Warp-net/libp2p-camouflage-transport v0.0.3/go.mod h1:Ki1TfLYtJgF4vxRYfZwfk8m4FJOVxP8eVmr6VemVkpQ=
-github.com/Warp-net/warpnet v1.0.1-0.20260929210213-7734196ebd16 h1:8+vLxWlUr/x7e2P9vbhAe0+bd6ppJ8QTvPpbkNSqUtw=
-github.com/Warp-net/warpnet v1.0.1-0.20260929210213-7734196ebd16/go.mod h1:AnaZ/5jtP2YWe+XjT0ZiPBzENV3xQ5nCmyvw2VeFVv8=
+github.com/Warp-net/warpnet v0.8.51-0.20260929210213-7734196ebd16 h1:KQNgj1sss4PJNY1xSWtiQPz4LC1q/sJQm0+860Frf/U=
+github.com/Warp-net/warpnet v0.8.51-0.20260929210213-7734196ebd16/go.mod h1:AnaZ/5jtP2YWe+XjT0ZiPBzENV3xQ5nCmyvw2VeFVv8=
 github.com/akutz/memconn v0.1.0 h1:NawI0TORU4hcOMsMr11g7vwlCdkYeLKXBcxWu2W/P8A=
 github.com/akutz/memconn v0.1.0/go.mod h1:Jo8rI7m0NieZyLI5e2CDlRdRqRRB4S7Xp77ukDjH+Fw=
 github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa h1:LHTHcTQiSGT7VVbI0o4wBRNQIgn917usHWOd6VAffYI=
