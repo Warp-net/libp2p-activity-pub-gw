@@ -5,12 +5,13 @@ go 1.26.4
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/Warp-net/libp2p-camouflage-transport v0.0.3
-	github.com/Warp-net/warpnet v1.0.1-0.20260929210213-7734196ebd16
+	github.com/Warp-net/warpnet v0.8.51-0.20260929210213-7734196ebd16
 	github.com/filinvadim/ratelimiter v0.0.0-20250304112346-2ef3a2bd6f00
 	github.com/google/uuid v1.6.0
 	github.com/grokify/html-strip-tags-go v0.1.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/libp2p/go-libp2p v0.49.0
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/superseriousbusiness/httpsig v1.2.0-SSB
 	tailscale.com v1.100.0

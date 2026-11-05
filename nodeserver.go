@@ -68,11 +68,17 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 
 	handlers := map[string]routeHandler{
 		event.PUBLIC_GET_INFO: c.infoHandler(ownerHandle),
+		event.PUBLIC_GET_WHOTOFOLLOW: wrapJSON(func(ctx context.Context, ev getAllUsersEvent) (any, error) {
+			return b.GetWhoToFollow(ctx, ev)
+		}),
 
 		routeGetUser: wrapJSON(func(ctx context.Context, ev getUserEvent) (any, error) {
 			return b.GetUser(ctx, string(ev.UserId))
 		}),
 		routeGetUsers: wrapJSON(func(ctx context.Context, ev getAllUsersEvent) (any, error) {
+			if string(ev.UserId) == ownerHandle {
+				return b.GetWhoToFollow(ctx, ev)
+			}
 			u, err := b.GetUserBrief(ctx, string(ev.UserId)) // list context: skip count fetches
 			if err != nil {
 				return event.UsersResponse{}, nil //nolint:nilerr // unknown handle -> empty

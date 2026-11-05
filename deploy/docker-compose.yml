@@ -13,6 +13,7 @@ services:
       # touching NODE_NETWORK. Empty leaves the node running.
       - GATEWAY_DISABLE_WARPNET=${GATEWAY_DISABLE_WARPNET:-}
       - GATEWAY_DISABLE_TESTNET=${GATEWAY_DISABLE_TESTNET:-}
+      - GATEWAY_DISCOVERY_HOST=${GATEWAY_DISCOVERY_HOST-mastodon.social}
       - GATEWAY_LOGS_TOKEN=${GATEWAY_LOGS_TOKEN:-}
       # Standalone plain-HTTP debug listener (/logs + /debug/pprof). With
       # network_mode host this binds directly on the droplet
