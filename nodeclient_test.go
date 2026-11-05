@@ -334,9 +334,7 @@ func TestStreamToMemberWithoutADHT(t *testing.T) {
 // only run when a routing table exists are exercised.
 func withDHT(t *testing.T, c *nodeClient) *nodeClient {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	kdht, err := dht.New(ctx, c.h, dht.Mode(dht.ModeServer))
+	kdht, err := dht.New(c.h, dht.Mode(dht.ModeServer))
 	if err != nil {
 		t.Fatalf("dht: %v", err)
 	}

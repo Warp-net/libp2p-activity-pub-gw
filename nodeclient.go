@@ -204,7 +204,7 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	// Join Warpnet's Kademlia DHT (prefix "/<network>", bootstrapped via the
 	// relays) as a server so member nodes can still resolve the gateway's
 	// circuit address via FindPeer, even though it is only reachable via relays.
-	kdht, err := dht.New(ctx, h,
+	kdht, err := dht.New(h,
 		dht.Mode(dht.ModeServer),
 		dht.ProtocolPrefix(protocol.ID("/"+network)),
 		dht.BootstrapPeers(entries...),

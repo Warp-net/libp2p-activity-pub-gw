@@ -33,9 +33,10 @@ import (
 	"net/http"
 )
 
-// staticFS holds the Warpnet logo served as the actor's custom emoji badge.
+// staticFS holds the Warpnet logo served as the actor's custom emoji badge and
+// the picture a sponsored tweet federates as.
 //
-//go:embed static/warpnet.png
+//go:embed static/warpnet.png static/sponsored.png
 var staticFS embed.FS
 
 const (
