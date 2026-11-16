@@ -109,6 +109,7 @@ docker build -f Dockerfile.gateway -t warpnet-gateway .
 ```sh
 docker run -d --name warpnet-gw -v warpnet-gw-data:/data \
   -e TS_AUTHKEY=tskey-auth-xxxxxxxx \      # from A4
+  -e GATEWAY_P2P_SEED=<secret, >= 32 bytes> \
   warpnet-gateway
 ```
 

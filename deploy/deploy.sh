@@ -14,7 +14,7 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u filinvadim --password-stdin
 docker pull ghcr.io/warp-net/warpnet-gateway:latest
 
 # One gateway process serves every network, and there can only be one: the
-# libp2p identity comes from a fixed seed, so a second gateway on the same
+# libp2p identity comes from one seed, so a second gateway on the same
 # network fights this one for the peer id, and both would drive the same
 # Tailscale node out of /data. Retire the old testnet-only stack — a no-op once
 # it is gone.

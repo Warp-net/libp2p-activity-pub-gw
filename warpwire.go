@@ -38,6 +38,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"os"
 	"time"
 
 	wjson "github.com/Warp-net/warpnet/json"
@@ -51,11 +52,26 @@ import (
 
 const defaultWarpnetNetwork = "warpnet"
 
-// defaultGatewaySeed derives the gateway's stable libp2p identity (warpnet pins
-// the resulting peer id as mastodon.GatewayNodeID, so it is not configurable).
-// The same identity is used on every network: they are PSK-isolated, so the peer
-// id can (and must) be the one warpnet expects on each of them.
-const defaultGatewaySeed = "warpnet-activitypub-gateway"
+// gatewaySeedEnv names the secret seed of the gateway's stable libp2p identity.
+// Warpnet pins the resulting peer id (fediverse.DefaultGatewayNodeID) and trusts
+// it as the home node of every bridged user, so the seed must stay secret: a
+// public seed lets anyone run a node that speaks as any Fediverse account. The
+// same identity is used on every network: they are PSK-isolated, so the peer id
+// can (and must) be the one warpnet expects on each of them.
+const (
+	gatewaySeedEnv    = "GATEWAY_P2P_SEED"
+	minGatewaySeedLen = 32
+)
+
+var errGatewaySeed = fmt.Errorf("%s must be set to a secret of at least %d bytes", gatewaySeedEnv, minGatewaySeedLen)
+
+func gatewaySeed() ([]byte, error) {
+	seed := os.Getenv(gatewaySeedEnv)
+	if len(seed) < minGatewaySeedLen {
+		return nil, errGatewaySeed
+	}
+	return []byte(seed), nil
+}
 
 // p2pListenByNetwork is each network's libp2p listen address. The gateway joins
 // every configured network in one process, so each node needs its own port. They

@@ -37,6 +37,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -46,6 +47,7 @@ import (
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
@@ -55,7 +57,12 @@ const (
 	maxRequestBytes = 1 << 20
 	// apRequestTimeout bounds the ActivityPub work to answer one node request.
 	apRequestTimeout = 90 * time.Second
+	// messageFreshnessWindow caps how far a signed timestamp may drift from now
+	// (warpnet's middleware.messageFreshnessWindow).
+	messageFreshnessWindow = 5 * time.Minute
 )
+
+var errForeignActor = errors.New("nodeserver: request not sent by the acting user's node")
 
 // routeHandler answers one public route from the signed request body.
 type routeHandler func(ctx context.Context, body []byte) (any, error)
@@ -205,10 +212,25 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 			netLog(c.network).Warnf("nodeserver: %s: signature missing", route)
 			return
 		}
-		if conn := s.Conn(); conn != nil {
-			pub := warpnet.FromIDToPubKey(conn.RemotePeer())
-			if verr := security.VerifySignature(pub, msg.SigningBytes(), msg.Signature); verr != nil {
-				netLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
+		conn := s.Conn()
+		if conn == nil {
+			netLog(c.network).Warnf("nodeserver: %s: connection is not ready", route)
+			return
+		}
+		remote := conn.RemotePeer()
+		pub := warpnet.FromIDToPubKey(remote)
+		if verr := security.VerifySignature(pub, msg.SigningBytes(), msg.Signature); verr != nil {
+			netLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, remote, verr)
+			return
+		}
+		if !isFresh(msg.Timestamp) {
+			netLog(c.network).Warnf("nodeserver: %s: stale/replayed message from %s ts=%s", route, remote, msg.Timestamp)
+			return
+		}
+		if actorOf, ok := writeActors[route]; ok {
+			if aerr := c.verifyActor(remote, actorOf(msg.Body)); aerr != nil {
+				netLog(c.network).Warnf("nodeserver: %s: %v: peer %s", route, aerr, remote)
+				c.writeResponse(s, route, event.ResponseError{Message: aerr.Error()})
 				return
 			}
 		}
@@ -226,15 +248,69 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 			netLog(c.network).Warnf("nodeserver: %s: %v", route, herr)
 			resp = event.ResponseError{Message: herr.Error()}
 		}
-		out, merr := wjson.Marshal(resp)
-		if merr != nil {
-			netLog(c.network).Errorf("nodeserver: %s: marshal response: %v", route, merr)
-			return
-		}
-		if _, werr := s.Write(out); werr != nil {
-			netLog(c.network).Warnf("nodeserver: %s: write: %v", route, werr)
-		}
+		c.writeResponse(s, route, resp)
 	}
+}
+
+func (c *nodeClient) writeResponse(s network.Stream, route string, resp any) {
+	out, merr := wjson.Marshal(resp)
+	if merr != nil {
+		netLog(c.network).Errorf("nodeserver: %s: marshal response: %v", route, merr)
+		return
+	}
+	if _, werr := s.Write(out); werr != nil {
+		netLog(c.network).Warnf("nodeserver: %s: write: %v", route, werr)
+	}
+}
+
+// isFresh mirrors warpnet's auth middleware: a signed timestamp outside
+// messageFreshnessWindow is a stale or replayed request.
+func isFresh(ts time.Time) bool {
+	if ts.IsZero() {
+		return false
+	}
+	skew := time.Since(ts)
+	if skew < 0 {
+		skew = -skew
+	}
+	return skew <= messageFreshnessWindow
+}
+
+// writeActors names, per write route, the Warpnet user the request acts as on
+// the Fediverse. Only that user's home node may send it (warpnet.VerifyAuthorship).
+var writeActors = map[string]func(body []byte) string{
+	routePostTweet:     actorOf(func(ev tweet) string { return ev.UserId }),
+	routePostReply:     actorOf(func(ev tweet) string { return ev.UserId }),
+	routePostTimeline:  actorOf(func(ev tweet) string { return ev.UserId }),
+	routeDeleteTweet:   actorOf(func(ev deleteTweetEvent) string { return string(ev.UserId) }),
+	routePostFollow:    actorOf(func(ev newFollowEvent) string { return string(ev.FollowerId) }),
+	routePostUnfollow:  actorOf(func(ev newFollowEvent) string { return string(ev.FollowerId) }),
+	routePostReact:     actorOf(func(ev reactionEvent) string { return string(ev.OwnerId) }),
+	routePostUnreact:   actorOf(func(ev reactionEvent) string { return string(ev.OwnerId) }),
+	routePostRetweet:   actorOf(retweeterOf),
+	routePostUnretweet: actorOf(func(ev unretweetEvent) string { return string(ev.RetweeterId) }),
+}
+
+func actorOf[T any](field func(T) string) func([]byte) string {
+	return func(body []byte) string {
+		var ev T
+		if wjson.Unmarshal(body, &ev) != nil {
+			return ""
+		}
+		return field(ev)
+	}
+}
+
+// verifyActor accepts a write only from the acting user's home node.
+func (c *nodeClient) verifyActor(remote peer.ID, userID string) error {
+	if userID == "" {
+		return errForeignActor
+	}
+	owner, ok := c.ownerNode(userID)
+	if !ok || owner != remote {
+		return errForeignActor
+	}
+	return nil
 }
 
 // infoHandler reports the gateway as a member node owned by ownerHandle. It is

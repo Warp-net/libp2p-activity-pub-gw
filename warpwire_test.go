@@ -65,14 +65,27 @@ func TestStreamSignatureVerifiesAgainstThePeerKey(t *testing.T) {
 	}
 }
 
-// The gateway's libp2p identity is derived from a fixed seed: warpnet pins the
+// The gateway's libp2p identity is derived from a secret seed: warpnet pins the
 // resulting peer id, so a change here orphans every bridged Mastodon user.
 func TestGatewayIdentityIsDeterministic(t *testing.T) {
-	a, err := security.GenerateKeyFromSeed([]byte(defaultGatewaySeed))
+	t.Setenv(gatewaySeedEnv, "")
+	if _, err := gatewaySeed(); err == nil {
+		t.Fatal("a missing seed must be refused, never defaulted")
+	}
+	t.Setenv(gatewaySeedEnv, "too-short")
+	if _, err := gatewaySeed(); err == nil {
+		t.Fatal("a short seed must be refused")
+	}
+	t.Setenv(gatewaySeedEnv, "a-test-seed-that-is-at-least-32-bytes")
+	seed, err := gatewaySeed()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := security.GenerateKeyFromSeed([]byte(defaultGatewaySeed))
+	a, err := security.GenerateKeyFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := security.GenerateKeyFromSeed(seed)
 	if err != nil {
 		t.Fatal(err)
 	}

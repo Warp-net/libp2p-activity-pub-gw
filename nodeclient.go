@@ -146,11 +146,15 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 		return nil, fmt.Errorf("nodeclient: %s: %w", network, errNoListenAddr)
 	}
 
-	// Deterministic identity: a fixed seed yields a stable peer id across
+	// Deterministic identity: a secret seed yields a stable peer id across
 	// restarts so the node_id carried on bridged Mastodon users keeps resolving
 	// back to this gateway (a rotating id would orphan them). Same derivation as
 	// a Warpnet member node (security.GenerateKeyFromSeed).
-	priv, err := security.GenerateKeyFromSeed([]byte(defaultGatewaySeed))
+	seed, err := gatewaySeed()
+	if err != nil {
+		return nil, fmt.Errorf("nodeclient: identity: %w", err)
+	}
+	priv, err := security.GenerateKeyFromSeed(seed)
 	if err != nil {
 		return nil, fmt.Errorf("nodeclient: identity: %w", err)
 	}

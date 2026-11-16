@@ -40,6 +40,7 @@ resulting from the use or misuse of this software.
 // connector to the Warpnet network.
 //
 // Configuration is environment-only and intentionally minimal: GATEWAY_KEY,
+// GATEWAY_P2P_SEED (the secret libp2p identity seed),
 // GATEWAY_FUNNEL_DIR, GATEWAY_FUNNEL_HOSTNAME, TS_AUTHKEY, GATEWAY_AP_MIRROR
 // (the instance asked for posts an account's own server will not serve), and the
 // standard NODE_NETWORK (one name or a comma-separated list, each network's node
@@ -69,7 +70,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.109"
+const gatewayVersion = "0.1.110"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -86,6 +87,9 @@ func main() {
 	log.Infof("gateway: starting version %s", gatewayVersion)
 
 	keyPath := envOr("GATEWAY_KEY", "fediverse-gateway-key.pem")
+	if _, err := gatewaySeed(); err != nil {
+		log.Fatalf(fatalFmt, err)
+	}
 
 	// Self-host the public endpoint via embedded Tailscale Funnel: the gateway
 	// becomes its own tailnet node and ListenFunnel (below) serves public HTTPS

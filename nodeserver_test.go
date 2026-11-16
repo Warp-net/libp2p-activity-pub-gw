@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +89,8 @@ func newNodeFixture(t *testing.T) *nodeFixture {
 		t.Fatalf("connect: %v", err)
 	}
 	client.remember(server.h.ID())
+	// alice is the test user acting on write routes; her home node is the client.
+	server.owner.Add("alice", client.h.ID())
 
 	return &nodeFixture{server: server, client: client, g: g, peer: f, handle: "bob@" + f.host(), actor: actorURL}
 }
@@ -211,6 +214,105 @@ func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
 			t.Fatalf("response = %q, want a signature from another key refused", got)
 		}
 	})
+}
+
+// signedEnvelope builds an envelope for route signed by the fixture's client.
+func (fx *nodeFixture) signedEnvelope(t *testing.T, route string, payload any, ts time.Time) []byte {
+	t.Helper()
+	body, err := wjson.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := message{
+		Body: wjson.RawMessage(body), MessageId: "m-" + t.Name(),
+		NodeId: fx.client.h.ID().String(), Destination: route,
+		Timestamp: ts, Version: "0.0.0",
+	}
+	msg.Signature = security.Sign(fx.client.priv, msg.SigningBytes())
+	env, err := wjson.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+// A captured request must not be replayable: like warpnet's auth middleware,
+// a timestamp outside the freshness window is refused.
+func TestNodeServerRejectsStaleEnvelopes(t *testing.T) {
+	fx := newNodeFixture(t)
+	req := getUserEvent{UserId: "alice"}
+	for name, ts := range map[string]time.Time{
+		"a replayed old envelope":    time.Now().Add(-messageFreshnessWindow - time.Minute),
+		"a future-dated envelope":    time.Now().Add(messageFreshnessWindow + time.Minute),
+		"an envelope without a time": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := fx.rawStream(t, event.PUBLIC_GET_INFO, fx.signedEnvelope(t, event.PUBLIC_GET_INFO, req, ts)); len(got) != 0 {
+				t.Fatalf("response = %q, want the stream dropped", got)
+			}
+		})
+	}
+	t.Run("a fresh envelope is answered", func(t *testing.T) {
+		if got := fx.rawStream(t, event.PUBLIC_GET_INFO, fx.signedEnvelope(t, event.PUBLIC_GET_INFO, req, time.Now())); len(got) == 0 {
+			t.Fatal("a fresh, signed envelope must be answered")
+		}
+	})
+}
+
+func TestIsFresh(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		ts   time.Time
+		want bool
+	}{
+		{now, true},
+		{now.Add(-messageFreshnessWindow + time.Second), true},
+		{now.Add(messageFreshnessWindow - time.Second), true},
+		{now.Add(-messageFreshnessWindow - time.Second), false},
+		{now.Add(messageFreshnessWindow + time.Second), false},
+		{time.Time{}, false},
+	} {
+		if got := isFresh(tc.ts); got != tc.want {
+			t.Errorf("isFresh(%s) = %v, want %v", tc.ts, got, tc.want)
+		}
+	}
+}
+
+// A validly signed write must come from the acting user's own home node: any
+// other Warpnet node is refused, so it cannot make the gateway speak on the
+// Fediverse as someone else (warpnet.VerifyAuthorship).
+func TestNodeServerRejectsWritesFromForeignNodes(t *testing.T) {
+	fx := newNodeFixture(t)
+	noteURL := fx.peer.url("/users/bob/statuses/1")
+	parent := noteURL
+	// mallory's home node is some other peer, not the caller.
+	fx.server.owner.Add("mallory", fx.server.h.ID())
+
+	for _, actor := range []string{"mallory", ""} {
+		by := actor
+		for route, payload := range map[string]any{
+			routePostTweet:     tweet{Id: "t1", UserId: actor, Text: "x", CreatedAt: time.Now()},
+			routePostReply:     tweet{Id: "r1", ParentId: &parent, RootId: noteURL, UserId: actor, Text: "x"},
+			routePostTimeline:  tweet{Id: "t2", UserId: actor, Text: "x"},
+			routeDeleteTweet:   deleteTweetEvent{UserId: actor, TweetId: "r1", ParentId: noteURL, RootId: noteURL},
+			routePostFollow:    newFollowEvent{FollowerId: actor, FollowingId: fx.handle},
+			routePostUnfollow:  newFollowEvent{FollowerId: actor, FollowingId: fx.handle},
+			routePostReact:     reactionEvent{OwnerId: actor, TweetId: noteURL},
+			routePostUnreact:   reactionEvent{OwnerId: actor, TweetId: noteURL},
+			routePostRetweet:   tweet{Id: noteURL, UserId: "carol", RetweetedBy: &by},
+			routePostUnretweet: unretweetEvent{RetweeterId: actor, TweetId: noteURL},
+		} {
+			t.Run(route+" as "+actor, func(t *testing.T) {
+				got := fx.rawStream(t, route, fx.signedEnvelope(t, route, payload, time.Now()))
+				if rerr := nodeResponseError(got); rerr == nil || !strings.Contains(rerr.Error(), errForeignActor.Error()) {
+					t.Fatalf("response = %q, want a foreign-author error", got)
+				}
+			})
+		}
+	}
+	if got := fx.peer.delivered(); len(got) != 0 {
+		t.Fatalf("delivered = %+v, want nothing federated", got)
+	}
 }
 
 func TestNodeServerReadRoutes(t *testing.T) {
