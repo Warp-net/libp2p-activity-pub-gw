@@ -37,10 +37,6 @@ package main
 
 import (
 	"context"
-	"crypto"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"io"
 	"time"
@@ -66,13 +62,7 @@ const (
 	messageFreshnessWindow = 5 * time.Minute
 )
 
-var (
-	errForeignActor    = errors.New("nodeserver: request not sent by the acting user's node")
-	errBadProofRequest = errors.New("nodeserver: bad gateway proof request")
-)
-
-// minProofNonce is the shortest nonce the gateway signs.
-const minProofNonce = 16
+var errForeignActor = errors.New("nodeserver: request not sent by the acting user's node")
 
 // routeHandler answers one public route from the signed request body.
 type routeHandler func(ctx context.Context, body []byte) (any, error)
@@ -191,9 +181,6 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		routePostUnretweet: wrapJSON(func(ctx context.Context, ev unretweetEvent) (any, error) {
 			return struct{}{}, b.Announce(ctx, string(ev.RetweeterId), string(ev.TweetId), true)
 		}),
-		routeGatewayProof: wrapJSON(func(ctx context.Context, ev gatewayProofEvent) (any, error) {
-			return c.gatewayProof(ctx, g.key, ev)
-		}),
 	}
 
 	for route, h := range handlers {
@@ -255,7 +242,7 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 		// line below reports the fetch count and total wall-clock.
 		ctx, tr := startTrace(ctx)
 		start := time.Now()
-		resp, herr := h(context.WithValue(ctx, remotePeerKey{}, remote), msg.Body)
+		resp, herr := h(ctx, msg.Body)
 		netLog(c.network).Infof("[%s] libp2p %s: %d REST calls in %s", tr.id, route, tr.calls.Load(), time.Since(start).Round(time.Millisecond))
 		if herr != nil {
 			netLog(c.network).Warnf("nodeserver: %s: %v", route, herr)
@@ -312,43 +299,6 @@ func actorOf[T any](field func(T) string) func([]byte) string {
 		}
 		return field(ev)
 	}
-}
-
-type remotePeerKey struct{}
-
-type gatewayProofEvent struct {
-	Nonce string `json:"nonce"`
-}
-
-type gatewayProofResponse struct {
-	Signature string `json:"signature"`
-}
-
-// gatewayProofBytes mirrors warpnet's fediverse.GatewayProofBytes: the nonce
-// bound to both ends of the connection, so a proof cannot be relayed.
-func gatewayProofBytes(nonce []byte, clientID, gatewayID string) []byte {
-	bt := []byte("warpnet-gateway-proof\x00")
-	bt = append(bt, nonce...)
-	bt = append(bt, 0)
-	bt = append(bt, clientID...)
-	bt = append(bt, 0)
-	return append(bt, gatewayID...)
-}
-
-// gatewayProof signs the caller's nonce with the RSA signing key, which, unlike
-// the libp2p key, is secret: it proves this connection reaches the gateway.
-func (c *nodeClient) gatewayProof(ctx context.Context, key *rsa.PrivateKey, ev gatewayProofEvent) (any, error) {
-	remote, _ := ctx.Value(remotePeerKey{}).(peer.ID)
-	nonce, err := base64.StdEncoding.DecodeString(ev.Nonce)
-	if err != nil || len(nonce) < minProofNonce || remote == "" || remote == c.h.ID() || key == nil {
-		return nil, errBadProofRequest
-	}
-	digest := sha256.Sum256(gatewayProofBytes(nonce, remote.String(), c.h.ID().String()))
-	sig, err := rsa.SignPKCS1v15(nil, key, crypto.SHA256, digest[:])
-	if err != nil {
-		return nil, err
-	}
-	return gatewayProofResponse{Signature: base64.StdEncoding.EncodeToString(sig)}, nil
 }
 
 // verifyActor accepts a write only from the acting user's home node.

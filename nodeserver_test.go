@@ -5,10 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -316,44 +312,6 @@ func TestNodeServerRejectsWritesFromForeignNodes(t *testing.T) {
 	}
 	if got := fx.peer.delivered(); len(got) != 0 {
 		t.Fatalf("delivered = %+v, want nothing federated", got)
-	}
-}
-
-// The gateway's libp2p seed is public, so a node trusts a connection to it only
-// once it signs the node's nonce with the gateway's secret RSA key.
-func TestNodeServerSignsGatewayProof(t *testing.T) {
-	fx := newNodeFixture(t)
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatal(err)
-	}
-	var resp gatewayProofResponse
-	fx.call(t, routeGatewayProof, gatewayProofEvent{Nonce: base64.StdEncoding.EncodeToString(nonce)}, &resp)
-	sig, err := base64.StdEncoding.DecodeString(resp.Signature)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(gatewayProofBytes(nonce, fx.client.h.ID().String(), fx.server.h.ID().String()))
-	if err := rsa.VerifyPKCS1v15(&fx.g.key.PublicKey, crypto.SHA256, digest[:], sig); err != nil {
-		t.Fatalf("proof does not verify for this caller: %v", err)
-	}
-
-	t.Run("a short nonce is refused", func(t *testing.T) {
-		bt, err := fx.client.request(routeGatewayProof, gatewayProofEvent{Nonce: base64.StdEncoding.EncodeToString([]byte("x"))})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if nodeResponseError(bt) == nil {
-			t.Fatalf("response = %s, want an error", bt)
-		}
-	})
-}
-
-// Must stay byte-identical to warpnet's fediverse.GatewayProofBytes.
-func TestGatewayProofBytes(t *testing.T) {
-	got := string(gatewayProofBytes([]byte{1, 2}, "client", "gateway"))
-	if want := "warpnet-gateway-proof\x00\x01\x02\x00client\x00gateway"; got != want {
-		t.Fatalf("proof bytes = %q, want %q", got, want)
 	}
 }
 
