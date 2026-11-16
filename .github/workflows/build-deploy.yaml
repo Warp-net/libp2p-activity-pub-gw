@@ -58,4 +58,4 @@ jobs:
         run: |
           scp -o StrictHostKeyChecking=accept-new ./deploy/deploy.sh root@207.154.221.44:/root
           scp -o StrictHostKeyChecking=accept-new ./deploy/docker-compose.yml root@207.154.221.44:/root/docker-compose.yml
-          ssh -o StrictHostKeyChecking=accept-new root@207.154.221.44 'GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} TS_AUTHKEY=${{ secrets.TS_AUTHKEY }} GATEWAY_P2P_SEED=${{ secrets.GATEWAY_P2P_SEED }} GATEWAY_LOGS_TOKEN=${{ secrets.GATEWAY_LOGS_TOKEN }} bash /root/deploy.sh'
+          ssh -o StrictHostKeyChecking=accept-new root@207.154.221.44 'GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} TS_AUTHKEY=${{ secrets.TS_AUTHKEY }} GATEWAY_LOGS_TOKEN=${{ secrets.GATEWAY_LOGS_TOKEN }} bash /root/deploy.sh'

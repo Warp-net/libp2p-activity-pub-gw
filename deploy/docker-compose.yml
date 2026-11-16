@@ -23,9 +23,6 @@ services:
       # Public HTTPS via embedded Tailscale Funnel (no domain, no cert mgmt).
       # Provide TS_AUTHKEY as a CI secret.
       - TS_AUTHKEY=${TS_AUTHKEY:-}
-      # Secret seed of the gateway's libp2p identity (its peer id is pinned in
-      # warpnet as fediverse.DefaultGatewayNodeID). Provide it as a CI secret.
-      - GATEWAY_P2P_SEED=${GATEWAY_P2P_SEED:-}
       - GATEWAY_FUNNEL_HOSTNAME=warpnet-gw
     volumes:
       # The live Tailscale node identity is in here, and it is what keeps the
