@@ -69,6 +69,9 @@ const (
 	// routeDeleteTweet is the route warpnet forwards a reply deletion over to
 	// the parent author's node.
 	routeDeleteTweet = event.PRIVATE_DELETE_TWEET
+	// routeGatewayProof is warpnet's event.PUBLIC_GET_GATEWAY_PROOF: a node
+	// proves a connection reaches this gateway (its libp2p seed is public).
+	routeGatewayProof = "/public/get/gateway/proof/0.0.0"
 )
 
 // Wire envelope + domain payloads (warpnet's own types).
