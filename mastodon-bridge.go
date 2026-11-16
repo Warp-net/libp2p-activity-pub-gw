@@ -189,8 +189,11 @@ func (g *gateway) resolveActorID(ctx context.Context, handle string) (string, er
 		return actorURL, nil
 	}
 	name, instance, ok := strings.Cut(strings.TrimPrefix(handle, "@"), "@")
-	if !ok || name == "" || instance == "" {
+	if !ok || name == "" || instance == "" || isNostrHandle(handle) {
 		return "", fmt.Errorf("mastodon: %q is not a name@instance handle", handle)
+	}
+	if isMostrHost(instance) {
+		return "", fmt.Errorf("mastodon: %q is a Mostr copy of a Nostr account", handle)
 	}
 	if g.isSelfHost(instance) {
 		return "", fmt.Errorf("mastodon: %q is a Warpnet user served by this gateway: %w", handle, errSelfTarget)

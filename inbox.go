@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,6 +83,10 @@ func (g *gateway) handleInbox(w http.ResponseWriter, r *http.Request, user strin
 		return
 	}
 	log.Infof("inbox: %s from %s", typ, remoteActor)
+	if u, perr := url.Parse(remoteActor); perr == nil && isMostrHost(u.Hostname()) {
+		w.WriteHeader(http.StatusAccepted) // Nostr reaches Warpnet directly, not through Mostr
+		return
+	}
 
 	switch typ {
 	case typeFollow:

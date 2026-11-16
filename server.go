@@ -149,6 +149,11 @@ type gateway struct {
 	logs      *logRing
 	logsToken string
 
+	// nostrRelays reaches Nostr relays and nostrLive follows the Nostr
+	// authors Warpnet users follow; both nil disables the Nostr bridge.
+	nostrRelays nostrRelays
+	nostrLive   *nostrLive
+
 	// allowPrivateTargets disables the SSRF guard's loopback/private-range
 	// rejection for outbound delivery. Test-only; never set in main.go.
 	allowPrivateTargets bool

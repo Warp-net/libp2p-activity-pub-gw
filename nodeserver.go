@@ -38,10 +38,12 @@ package main
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/Warp-net/warpnet/core/warpnet"
+	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
@@ -65,6 +67,15 @@ type routeHandler func(ctx context.Context, body []byte) (any, error)
 // account advertised as the node owner.
 func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 	b := newMastodonBridge(g, c.h.ID().String())
+	nb := g.newNostrBridge(c.h.ID().String())
+	nostrID := func(id string) bool {
+		return nb != nil && (isNostrHandle(id) || isNostrEventID(strings.TrimPrefix(id, domain.RetweetPrefix)))
+	}
+	// Interactions with Nostr content stay inside Warpnet until publishing to
+	// Nostr is enabled; they are acknowledged so the node keeps them.
+	nostrReply := func(ev tweet) bool {
+		return ev.ParentId != nil && nostrID(*ev.ParentId) || nostrID(ev.RootId)
+	}
 
 	handlers := map[string]routeHandler{
 		event.PUBLIC_GET_INFO: c.infoHandler(ownerHandle),
@@ -73,31 +84,53 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		}),
 
 		routeGetUser: wrapJSON(func(ctx context.Context, ev getUserEvent) (any, error) {
+			if nostrID(string(ev.UserId)) {
+				return nb.GetUser(ctx, string(ev.UserId))
+			}
 			return b.GetUser(ctx, string(ev.UserId))
 		}),
 		routeGetUsers: wrapJSON(func(ctx context.Context, ev getAllUsersEvent) (any, error) {
 			if string(ev.UserId) == ownerHandle {
 				return b.GetWhoToFollow(ctx, ev)
 			}
-			u, err := b.GetUserBrief(ctx, string(ev.UserId)) // list context: skip count fetches
+			getBrief := b.GetUserBrief
+			if nostrID(string(ev.UserId)) {
+				getBrief = nb.GetUserBrief
+			}
+			u, err := getBrief(ctx, string(ev.UserId)) // list context: skip count fetches
 			if err != nil {
 				return event.UsersResponse{}, nil //nolint:nilerr // unknown handle -> empty
 			}
 			return event.UsersResponse{Users: []user{u}}, nil
 		}),
 		routeGetTweets: wrapJSON(func(ctx context.Context, ev getAllTweetsEvent) (any, error) {
+			if nostrID(ev.UserId) || nostrID(ev.RootId) || nostrID(ev.ParentId) {
+				return nb.GetTweetsOrReplies(ctx, ev)
+			}
 			return b.GetTweetsOrReplies(ctx, ev)
 		}),
 		routeGetTweet: wrapJSON(func(ctx context.Context, ev getTweetEvent) (any, error) {
+			if nostrID(string(ev.TweetId)) {
+				return nb.GetTweet(ctx, string(ev.TweetId))
+			}
 			return b.GetTweet(ctx, string(ev.TweetId))
 		}),
 		event.PUBLIC_GET_TWEET_STATS: wrapJSON(func(ctx context.Context, ev getTweetEvent) (any, error) {
+			if nostrID(string(ev.TweetId)) {
+				return nb.GetTweetStats(ctx, string(ev.TweetId))
+			}
 			return b.GetTweetStats(ctx, string(ev.TweetId))
 		}),
 		routeGetFollowers: wrapJSON(func(ctx context.Context, ev getFollowersEvent) (any, error) {
+			if nostrID(ev.UserId) {
+				return nb.GetFollowers(ctx, ev.UserId, ev.Cursor)
+			}
 			return b.GetFollowers(ctx, string(ev.UserId), ev.Cursor)
 		}),
 		routeGetFollowings: wrapJSON(func(ctx context.Context, ev getFollowersEvent) (any, error) {
+			if nostrID(ev.UserId) {
+				return nb.GetFollowings(ctx, ev.UserId, ev.Cursor)
+			}
 			return b.GetFollowings(ctx, string(ev.UserId), ev.Cursor)
 		}),
 		routeGetImage: wrapJSON(func(ctx context.Context, ev getImageEvent) (any, error) {
@@ -120,19 +153,33 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			if err != nil {
 				return nil, err
 			}
+			if nostrID(string(ev.TweetId)) {
+				return reactionsCount(emoji, 0), nil
+			}
 			count, rerr := b.React(ctx, string(ev.OwnerId), string(ev.TweetId), emoji, false)
 			return reactionsCount(emoji, count), rerr
 		}),
 		// An unreact drops whichever reaction the user had, so it names no emoji
 		// and always federates as an Undo(Like).
 		routePostUnreact: wrapJSON(func(ctx context.Context, ev reactionEvent) (any, error) {
+			if nostrID(string(ev.TweetId)) {
+				return reactionsCount("", 0), nil
+			}
 			count, err := b.React(ctx, string(ev.OwnerId), string(ev.TweetId), "", true)
 			return reactionsCount("", count), err
 		}),
 		routePostFollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
+			if nostrID(string(ev.FollowingId)) {
+				g.nostrLive.setFollow(string(ev.FollowerId), string(ev.FollowingId), false)
+				return struct{}{}, nil
+			}
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), false)
 		}),
 		routePostUnfollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
+			if nostrID(string(ev.FollowingId)) {
+				g.nostrLive.setFollow(string(ev.FollowerId), string(ev.FollowingId), true)
+				return struct{}{}, nil
+			}
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), true)
 		}),
 		routePostTweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
@@ -144,9 +191,15 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			}
 			// Echo the reply back as the tweet the node stored, so the Warpnet
 			// UI renders it.
+			if nostrReply(ev) {
+				return ev, nil
+			}
 			return ev, b.Reply(ctx, ev)
 		}),
 		routePostReply: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
+			if nostrReply(ev) {
+				return ev, nil
+			}
 			return ev, b.Reply(ctx, ev)
 		}),
 		// A followed author's new tweet, delivered to this node as their
@@ -163,15 +216,21 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		// private delete route; federate it as an AP Delete. Only a reply (a
 		// parent set) targets a Mastodon note; anything else is acknowledged.
 		routeDeleteTweet: wrapJSON(func(ctx context.Context, ev deleteTweetEvent) (any, error) {
-			if ev.ParentId == "" && ev.RootId == "" {
+			if ev.ParentId == "" && ev.RootId == "" || nostrID(ev.ParentId) || nostrID(ev.RootId) {
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Delete(ctx, ev)
 		}),
 		routePostRetweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
+			if nostrID(retweetObject(ev)) {
+				return ev, nil
+			}
 			return ev, b.Announce(ctx, retweeterOf(ev), retweetObject(ev), false)
 		}),
 		routePostUnretweet: wrapJSON(func(ctx context.Context, ev unretweetEvent) (any, error) {
+			if nostrID(string(ev.TweetId)) {
+				return struct{}{}, nil
+			}
 			return struct{}{}, b.Announce(ctx, string(ev.RetweeterId), string(ev.TweetId), true)
 		}),
 	}

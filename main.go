@@ -69,7 +69,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.109"
+const gatewayVersion = "0.1.110"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -171,6 +171,21 @@ func main() {
 		// gateway, so it is wired once g exists. Its routes are user-scoped, so
 		// multiNode sends each to the network that user lives on.
 		g.followers = nodeFollowerStore{req: nodes, resolver: g}
+	}
+
+	// Nostr accounts are read from public relays; GATEWAY_DISABLE_NOSTR turns
+	// the bridge off.
+	if os.Getenv("GATEWAY_DISABLE_NOSTR") == "" {
+		g.nostrRelays = newRelayPool(newSafeClient(0))
+		nb := newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), "", host)
+		g.nostrLive = newNostrLive(nb, g.pushTimeline)
+		nb.trusted = g.nostrLive.trusted
+		go g.nostrLive.run(appCtx)
+		if nodes != nil {
+			for _, c := range clients {
+				go g.nostrLive.runScanner(appCtx, c, defaultOwnerHandle)
+			}
+		}
 	}
 
 	// Serve Warpnet's public /public routes over libp2p (Mastodon -> Warpnet) on
