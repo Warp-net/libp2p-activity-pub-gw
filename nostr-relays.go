@@ -114,36 +114,31 @@ func (p *relayPool) validRelayURL(raw string) bool {
 	return ok && validateRemoteURL("https://"+rest) == nil
 }
 
-// relay hands out a connection to raw until release is called; connections
-// nobody used for relayIdleTTL are closed.
-func (p *relayPool) relay(ctx context.Context, raw string) (r *nostr.Relay, release func(), ok bool) {
+// relay hands out a connection to raw under its normalized url, which the
+// caller hands back to release; connections nobody used for relayIdleTTL are
+// closed.
+func (p *relayPool) relay(ctx context.Context, raw string) (*nostr.Relay, string, bool) {
 	url := nostr.NormalizeURL(raw)
 	if !p.validRelayURL(url) || p.down.Contains(url) {
-		return nil, nil, false
-	}
-	release = func() {
-		p.mu.Lock()
-		p.active[url]--
-		p.used[url] = time.Now()
-		p.mu.Unlock()
+		return nil, "", false
 	}
 	p.mu.Lock()
 	p.sweep()
 	if cur, ok := p.conns[url]; ok && cur.IsConnected() {
 		p.active[url]++
 		p.mu.Unlock()
-		return cur, release, true
+		return cur, url, true
 	}
 	p.mu.Unlock()
 
-	r = nostr.NewRelay(context.Background(), url, nostr.RelayOptions{NoticeHandler: func(*nostr.Relay, string) {}})
+	r := nostr.NewRelay(context.Background(), url, nostr.RelayOptions{NoticeHandler: ignoreNotice})
 	dctx, cancel := context.WithTimeout(ctx, relayDialTimeout)
 	err := r.ConnectWithClient(dctx, p.client)
 	cancel()
 	if err != nil {
 		p.down.Add(url, struct{}{})
 		netLog("").Debugf("nostr: relay %s: %v", url, err)
-		return nil, nil, false
+		return nil, "", false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -153,8 +148,17 @@ func (p *relayPool) relay(ctx context.Context, raw string) (r *nostr.Relay, rele
 	}
 	p.conns[url] = r
 	p.active[url]++
-	return r, release, true
+	return r, url, true
 }
+
+func (p *relayPool) release(url string) {
+	p.mu.Lock()
+	p.active[url]--
+	p.used[url] = time.Now()
+	p.mu.Unlock()
+}
+
+func ignoreNotice(*nostr.Relay, string) {}
 
 func (p *relayPool) sweep() {
 	for url, r := range p.conns {
@@ -167,56 +171,79 @@ func (p *relayPool) sweep() {
 	}
 }
 
+// eventSet collects events from several relays, deduplicated by id.
+type eventSet struct {
+	mu   sync.Mutex
+	seen map[string]bool
+	out  []nostrEvent
+}
+
+func (s *eventSet) add(ev nostr.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id := ev.ID.Hex(); !s.seen[id] {
+		s.seen[id] = true
+		s.out = append(s.out, fromLibEvent(ev))
+	}
+}
+
+func newestFirst(a, b nostrEvent) int {
+	return int(b.CreatedAt - a.CreatedAt)
+}
+
 func (p *relayPool) fetch(ctx context.Context, urls []string, f nostrFilter) []nostrEvent {
 	filter, ok := toLibFilter(f)
 	if !ok {
 		return nil
 	}
-	var (
-		mu   sync.Mutex
-		seen = map[string]bool{}
-		out  []nostrEvent
-		wg   sync.WaitGroup
-	)
+	set := &eventSet{seen: map[string]bool{}}
+	var wg sync.WaitGroup
 	for _, u := range dedupeStrings(urls) {
-		wg.Go(func() {
-			r, release, ok := p.relay(ctx, u)
-			if !ok {
-				return
-			}
-			defer release()
-			sub, err := r.Subscribe(ctx, filter, nostr.SubscriptionOptions{MaxWaitForEOSE: relayEOSETimeout})
-			if err != nil {
-				return
-			}
-			defer sub.Unsub()
-			for n := 0; n < relayMaxPerFetch; n++ {
-				select {
-				case ev, open := <-sub.Events:
-					if !open {
-						return
-					}
-					mu.Lock()
-					if id := ev.ID.Hex(); !seen[id] {
-						seen[id] = true
-						out = append(out, fromLibEvent(ev))
-					}
-					mu.Unlock()
-				case <-sub.EndOfStoredEvents:
-					return
-				case <-sub.ClosedReason:
-					return
-				case <-sub.Context.Done():
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		})
+		wg.Add(1)
+		go p.fetchFrom(ctx, &wg, u, filter, set)
 	}
 	wg.Wait()
-	slices.SortFunc(out, func(a, b nostrEvent) int { return int(b.CreatedAt - a.CreatedAt) })
-	return out
+	slices.SortFunc(set.out, newestFirst)
+	return set.out
+}
+
+// fetchFrom reads one relay's stored events into set until EOSE.
+func (p *relayPool) fetchFrom(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, set *eventSet) {
+	defer wg.Done()
+	r, url, ok := p.relay(ctx, raw)
+	if !ok {
+		return
+	}
+	defer p.release(url)
+	sub, err := r.Subscribe(ctx, filter, nostr.SubscriptionOptions{MaxWaitForEOSE: relayEOSETimeout})
+	if err != nil {
+		return
+	}
+	defer sub.Unsub()
+	for n := 0; n < relayMaxPerFetch; n++ {
+		select {
+		case ev, open := <-sub.Events:
+			if !open {
+				return
+			}
+			set.add(ev)
+		case <-sub.EndOfStoredEvents:
+			return
+		case <-sub.ClosedReason:
+			return
+		case <-sub.Context.Done():
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// countResult keeps the largest count any relay reported.
+type countResult struct {
+	mu       sync.Mutex
+	best     int64
+	answered bool
 }
 
 func (p *relayPool) count(ctx context.Context, urls []string, f nostrFilter) (int64, bool) {
@@ -224,65 +251,77 @@ func (p *relayPool) count(ctx context.Context, urls []string, f nostrFilter) (in
 	if !ok {
 		return 0, false
 	}
-	var (
-		mu       sync.Mutex
-		best     int64
-		answered bool
-		wg       sync.WaitGroup
-	)
+	res := &countResult{}
+	var wg sync.WaitGroup
 	for _, u := range dedupeStrings(urls) {
-		wg.Go(func() {
-			r, release, ok := p.relay(ctx, u)
-			if !ok {
-				return
-			}
-			defer release()
-			cctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
-			defer cancel()
-			n, _, err := r.Count(cctx, filter, nostr.SubscriptionOptions{})
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			answered = true
-			best = max(best, int64(n))
-			mu.Unlock()
-		})
+		wg.Add(1)
+		go p.countAt(ctx, &wg, u, filter, res)
 	}
 	wg.Wait()
-	return best, answered
+	return res.best, res.answered
+}
+
+func (p *relayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, res *countResult) {
+	defer wg.Done()
+	r, url, ok := p.relay(ctx, raw)
+	if !ok {
+		return
+	}
+	defer p.release(url)
+	cctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
+	defer cancel()
+	n, _, err := r.Count(cctx, filter, nostr.SubscriptionOptions{})
+	if err != nil {
+		return
+	}
+	res.mu.Lock()
+	res.answered = true
+	res.best = max(res.best, int64(n))
+	res.mu.Unlock()
+}
+
+// liveDelivery hands each live event to on once, whichever relays carry it.
+type liveDelivery struct {
+	mu   sync.Mutex
+	seen *expirable.LRU[string, struct{}]
+	on   func(nostrEvent)
+}
+
+func (d *liveDelivery) deliver(ev nostr.Event) {
+	id := ev.ID.Hex()
+	d.mu.Lock()
+	dup := d.seen.Contains(id)
+	d.seen.Add(id, struct{}{})
+	d.mu.Unlock()
+	if !dup {
+		d.on(fromLibEvent(ev))
+	}
 }
 
 func (p *relayPool) subscribe(ctx context.Context, urls []string, f nostrFilter, on func(nostrEvent)) {
-	seen := expirable.NewLRU[string, struct{}](4096, nil, time.Hour)
-	var mu sync.Mutex
-	deliver := func(ev nostr.Event) {
-		id := ev.ID.Hex()
-		mu.Lock()
-		dup := seen.Contains(id)
-		seen.Add(id, struct{}{})
-		mu.Unlock()
-		if !dup {
-			on(fromLibEvent(ev))
-		}
-	}
+	d := &liveDelivery{seen: expirable.NewLRU[string, struct{}](4096, nil, time.Hour), on: on}
 	var wg sync.WaitGroup
 	for _, u := range dedupeStrings(urls) {
-		wg.Go(func() {
-			for ctx.Err() == nil {
-				p.follow(ctx, u, f, deliver)
-				select {
-				case <-ctx.Done():
-				case <-time.After(relayRetryBackoff):
-				}
-			}
-		})
+		wg.Add(1)
+		go p.keepFollowing(ctx, &wg, u, f, d)
 	}
 	wg.Wait()
 }
 
+// keepFollowing re-opens one relay's live subscription until ctx ends.
+func (p *relayPool) keepFollowing(ctx context.Context, wg *sync.WaitGroup, url string, f nostrFilter, d *liveDelivery) {
+	defer wg.Done()
+	for ctx.Err() == nil {
+		p.follow(ctx, url, f, d)
+		select {
+		case <-ctx.Done():
+		case <-time.After(relayRetryBackoff):
+		}
+	}
+}
+
 // follow keeps one live subscription on one relay until it drops or ctx ends.
-func (p *relayPool) follow(ctx context.Context, url string, f nostrFilter, deliver func(nostr.Event)) {
+func (p *relayPool) follow(ctx context.Context, raw string, f nostrFilter, d *liveDelivery) {
 	if f.Since == 0 {
 		f.Since = time.Now().Unix()
 	}
@@ -290,11 +329,11 @@ func (p *relayPool) follow(ctx context.Context, url string, f nostrFilter, deliv
 	if !ok {
 		return
 	}
-	r, release, ok := p.relay(ctx, url)
+	r, url, ok := p.relay(ctx, raw)
 	if !ok {
 		return
 	}
-	defer release()
+	defer p.release(url)
 	sub, err := r.Subscribe(ctx, filter, nostr.SubscriptionOptions{})
 	if err != nil {
 		return
@@ -306,7 +345,7 @@ func (p *relayPool) follow(ctx context.Context, url string, f nostrFilter, deliv
 			if !open {
 				return
 			}
-			deliver(ev)
+			d.deliver(ev)
 		case <-sub.ClosedReason:
 			return
 		case <-sub.Context.Done():

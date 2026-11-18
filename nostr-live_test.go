@@ -43,6 +43,40 @@ type pushed struct {
 	t        tweet
 }
 
+// pushRecorder stands in for the follower nodes.
+type pushRecorder struct {
+	mu   sync.Mutex
+	got  []pushed
+	mark int
+}
+
+func (r *pushRecorder) push(f string, tw tweet) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, pushed{f, tw})
+	return nil
+}
+
+func (r *pushRecorder) all() []pushed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]pushed{}, r.got...)
+}
+
+func (r *pushRecorder) any() bool { return len(r.all()) > 0 }
+
+func (r *pushRecorder) setMark() { r.mark = len(r.all()) }
+
+func (r *pushRecorder) pastMark() bool { return len(r.all()) > r.mark }
+
+// liveWatch waits for a live subscription on one author.
+type liveWatch struct {
+	relay *fakeRelay
+	pk    string
+}
+
+func (w liveWatch) ready() bool { return w.relay.liveFor(w.pk) }
+
 func TestNostrLivePushesFollowedNotes(t *testing.T) {
 	nostrResubscribeDelay = 10 * time.Millisecond
 	relay := newFakeRelay(t)
@@ -50,27 +84,16 @@ func TestNostrLivePushesFollowedNotes(t *testing.T) {
 	relay.add(alice.sign(t, kindFollowList, "", time.Now().Unix(), []string{"p", bob.pk}))
 	b := testNostrBridge(t, relay)
 
-	var mu sync.Mutex
-	var got []pushed
-	live := newNostrLive(b, func(f string, tw tweet) error {
-		mu.Lock()
-		got = append(got, pushed{f, tw})
-		mu.Unlock()
-		return nil
-	})
+	rec := &pushRecorder{}
+	live := newNostrLive(b, rec.push)
 	b.trusted = live.trusted
-	pushes := func() []pushed {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]pushed{}, got...)
-	}
 
 	live.setFollow("01WARPUSER", alice.handle(), false)
 	live.setFollow("01WARPUSER", "alice@damus.io", false)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go live.run(ctx)
-	waitFor(t, "live subscription", func() bool { return relay.liveFor(alice.pk) })
+	waitFor(t, "live subscription", liveWatch{relay, alice.pk}.ready)
 
 	if !live.trusted(alice.pk) || !live.trusted(bob.pk) || live.trusted(stranger.pk) {
 		t.Fatal("trust must cover followed authors and their followings only")
@@ -82,9 +105,9 @@ func TestNostrLivePushesFollowedNotes(t *testing.T) {
 		alice.sign(t, kindNote, "live reply", at, []string{"e", hexID('a'), "", "root"}),
 		stranger.sign(t, kindNote, "not followed", at),
 	)
-	waitFor(t, "push", func() bool { return len(pushes()) > 0 })
+	waitFor(t, "push", rec.any)
 	time.Sleep(100 * time.Millisecond)
-	p := pushes()
+	p := rec.all()
 	if len(p) != 1 || p[0].follower != "01WARPUSER" || p[0].t.Text != "live note" || p[0].t.UserId != alice.handle() {
 		t.Fatalf("pushes = %+v, want only the followed author's top-level note", p)
 	}
@@ -93,15 +116,15 @@ func TestNostrLivePushesFollowedNotes(t *testing.T) {
 		relay.add(alice.sign(t, kindNote, "flood "+hexID('f')[:4]+time.Now().String(), at))
 	}
 	time.Sleep(200 * time.Millisecond)
-	if n := len(pushes()); n > nostrAuthorBurst {
+	if n := len(rec.all()); n > nostrAuthorBurst {
 		t.Fatalf("%d pushes, want the per-author limit (%d) to cap a flood", n, nostrAuthorBurst)
 	}
 
 	live.setFollow("01OTHER", carol.handle(), false)
-	waitFor(t, "resubscription", func() bool { return relay.liveFor(carol.pk) })
-	before := len(pushes())
+	waitFor(t, "resubscription", liveWatch{relay, carol.pk}.ready)
+	rec.setMark()
 	relay.add(carol.sign(t, kindNote, "carol note", time.Now().Unix()+1))
-	waitFor(t, "carol push", func() bool { return len(pushes()) > before })
+	waitFor(t, "carol push", rec.pastMark)
 
 	live.setFollow("01WARPUSER", alice.handle(), true)
 	if len(live.followersOf(alice.pk)) != 0 {

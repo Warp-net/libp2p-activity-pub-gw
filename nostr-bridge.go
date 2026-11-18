@@ -204,15 +204,22 @@ func (b *nostrBridge) getUser(ctx context.Context, handle string, withCounts boo
 	}
 	relays := b.authorRelays(ctx, pk)
 	var wg sync.WaitGroup
-	wg.Go(func() { u.FollowingsCount = int64(len(b.followList(ctx, pk))) })
-	wg.Go(func() {
-		u.FollowersCount = b.countOr(ctx, relays, nostrFilter{Kinds: []int{kindFollowList}, Tags: map[string][]string{"p": {pk}}})
-	})
-	wg.Go(func() {
-		u.TweetsCount = b.countOr(ctx, relays, nostrFilter{Kinds: []int{kindNote}, Authors: []string{pk}})
-	})
+	wg.Add(3)
+	go b.followingsInto(ctx, &wg, pk, &u.FollowingsCount)
+	go b.countInto(ctx, &wg, relays, nostrFilter{Kinds: []int{kindFollowList}, Tags: map[string][]string{"p": {pk}}}, &u.FollowersCount)
+	go b.countInto(ctx, &wg, relays, nostrFilter{Kinds: []int{kindNote}, Authors: []string{pk}}, &u.TweetsCount)
 	wg.Wait()
 	return u, nil
+}
+
+func (b *nostrBridge) followingsInto(ctx context.Context, wg *sync.WaitGroup, pk string, out *int64) {
+	defer wg.Done()
+	*out = int64(len(b.followList(ctx, pk)))
+}
+
+func (b *nostrBridge) countInto(ctx context.Context, wg *sync.WaitGroup, relays []string, f nostrFilter, out *int64) {
+	defer wg.Done()
+	*out = b.countOr(ctx, relays, f)
 }
 
 // countOr asks for a NIP-45 count and falls back to a bounded fetch, so the
@@ -317,7 +324,7 @@ func (b *nostrBridge) GetTweets(ctx context.Context, handle string, limit *uint6
 	if len(evs) > 0 {
 		resp.Cursor = strconv.FormatInt(evs[len(evs)-1].CreatedAt-1, 10)
 	}
-	for _, t := range b.render(ctx, evs, func(string) bool { return true }) {
+	for _, t := range b.render(ctx, evs, false, "") {
 		if t.ParentId == nil {
 			resp.Tweets = append(resp.Tweets, t)
 		}
@@ -342,8 +349,7 @@ func (b *nostrBridge) GetReplies(ctx context.Context, id string) (tweetsResponse
 	evs := b.relays.fetch(ctx, b.relaysFor(ctx, id), nostrFilter{
 		Kinds: []int{kindNote}, Tags: map[string][]string{"e": {id}}, Limit: nostrBoundedFetch,
 	})
-	allowed := func(pk string) bool { return pk == author || b.isTrusted(pk) }
-	for _, t := range b.render(ctx, evs, allowed) {
+	for _, t := range b.render(ctx, evs, true, author) {
 		if t.ParentId != nil && *t.ParentId == id {
 			resp.Tweets = append(resp.Tweets, t)
 		}
@@ -364,7 +370,7 @@ func (b *nostrBridge) GetTweet(ctx context.Context, id string) (tweet, error) {
 		return tweet{}, errNostrNotFound
 	}
 	evs := b.relays.fetch(ctx, b.relaysFor(ctx, id), nostrFilter{IDs: []string{id}, Limit: 1})
-	ts := b.render(ctx, evs, func(string) bool { return true })
+	ts := b.render(ctx, evs, false, "")
 	if len(ts) == 0 {
 		return tweet{}, errNostrNotFound
 	}
@@ -380,20 +386,12 @@ func (b *nostrBridge) GetTweetStats(ctx context.Context, id string) (event.Tweet
 		return resp, errNostrNotFound
 	}
 	relays := b.relaysFor(ctx, id)
-	byKinds := func(kinds ...int) []nostrEvent {
-		var out []nostrEvent
-		for _, ev := range b.relays.fetch(ctx, relays, nostrFilter{Kinds: kinds, Tags: map[string][]string{"e": {id}}, Limit: nostrBoundedFetch}) {
-			if b.isTrusted(ev.PubKey) && !droppedNostrEvent(ev, b.selfHost) {
-				out = append(out, ev)
-			}
-		}
-		return out
-	}
 	var reactions, reposts, replies []nostrEvent
 	var wg sync.WaitGroup
-	wg.Go(func() { reactions = byKinds(kindReaction) })
-	wg.Go(func() { reposts = byKinds(kindRepost, kindGenericRepost) })
-	wg.Go(func() { replies = byKinds(kindNote) })
+	wg.Add(3)
+	go b.trustedReferrers(ctx, &wg, relays, id, &reactions, kindReaction)
+	go b.trustedReferrers(ctx, &wg, relays, id, &reposts, kindRepost, kindGenericRepost)
+	go b.trustedReferrers(ctx, &wg, relays, id, &replies, kindNote)
 	wg.Wait()
 
 	reacted := map[string]bool{}
@@ -418,6 +416,17 @@ func (b *nostrBridge) GetTweetStats(ctx context.Context, id string) (event.Tweet
 	return resp, nil
 }
 
+// trustedReferrers collects the events of the given kinds that reference id
+// and come from trusted authors.
+func (b *nostrBridge) trustedReferrers(ctx context.Context, wg *sync.WaitGroup, relays []string, id string, out *[]nostrEvent, kinds ...int) {
+	defer wg.Done()
+	for _, ev := range b.relays.fetch(ctx, relays, nostrFilter{Kinds: kinds, Tags: map[string][]string{"e": {id}}, Limit: nostrBoundedFetch}) {
+		if b.isTrusted(ev.PubKey) && !droppedNostrEvent(ev, b.selfHost) {
+			*out = append(*out, ev)
+		}
+	}
+}
+
 func lastTagValue(ev nostrEvent, name string) string {
 	vals := tagValues(ev, name)
 	if len(vals) == 0 {
@@ -426,10 +435,10 @@ func lastTagValue(ev nostrEvent, name string) string {
 	return vals[len(vals)-1]
 }
 
-// render maps events to tweets, dropping what never enters Warpnet and posts
-// by authors allow refuses. A repost becomes the reposted note stamped with
+// render maps events to tweets, dropping what never enters Warpnet and, when
+// trustedOnly, posts by authors other than author who are not trusted. A repost becomes the reposted note stamped with
 // RetweetedBy; its original is taken from the repost when signed, else fetched.
-func (b *nostrBridge) render(ctx context.Context, evs []nostrEvent, allow func(pk string) bool) []tweet {
+func (b *nostrBridge) render(ctx context.Context, evs []nostrEvent, trustedOnly bool, author string) []tweet {
 	type slot struct {
 		t        tweet
 		repostOf string
@@ -437,7 +446,7 @@ func (b *nostrBridge) render(ctx context.Context, evs []nostrEvent, allow func(p
 	slots := make([]slot, 0, len(evs))
 	var missing []string
 	for _, ev := range evs {
-		if droppedNostrEvent(ev, b.selfHost) || !allow(ev.PubKey) {
+		if droppedNostrEvent(ev, b.selfHost) || trustedOnly && ev.PubKey != author && !b.isTrusted(ev.PubKey) {
 			continue
 		}
 		b.authors.Add(ev.ID, ev.PubKey)
@@ -485,6 +494,19 @@ func (b *nostrBridge) render(ctx context.Context, evs []nostrEvent, allow func(p
 	}
 	b.names(ctx, out)
 	return out
+}
+
+// serves reports whether id is a Nostr account or note this bridge answers
+// for; a nil bridge (Nostr off) serves nothing.
+func (b *nostrBridge) serves(id string) bool {
+	return b != nil && (isNostrHandle(id) || isNostrEventID(strings.TrimPrefix(id, domain.RetweetPrefix)))
+}
+
+// isReplyTo reports whether ev replies to a Nostr note. Interactions with Nostr
+// content stay inside Warpnet until publishing to Nostr is enabled; they are
+// acknowledged so the node keeps them.
+func (b *nostrBridge) isReplyTo(ev tweet) bool {
+	return ev.ParentId != nil && b.serves(*ev.ParentId) || b.serves(ev.RootId)
 }
 
 // newNostrBridge serves Nostr reads as nodeID; nil when the bridge is off.

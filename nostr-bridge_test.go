@@ -236,7 +236,7 @@ func TestNostrRepliesAndStatsTrust(t *testing.T) {
 		stranger.sign(t, kindRepost, "", now, []string{"e", id}),
 	)
 	b := testNostrBridge(t, relay)
-	b.trusted = func(pk string) bool { return pk == friend.pk || pk == author.pk }
+	b.trusted = trustedKeys{friend.pk: true, author.pk: true}.has
 
 	if _, err := b.GetTweet(testCtx(t), id); err != nil {
 		t.Fatalf("GetTweet: %v", err)
@@ -302,3 +302,7 @@ func TestRelayURLGuard(t *testing.T) {
 		}
 	}
 }
+
+type trustedKeys map[string]bool
+
+func (k trustedKeys) has(pk string) bool { return k[pk] }

@@ -219,28 +219,37 @@ func (l *nostrLive) relaysFor(ctx context.Context, authors []string) []string {
 	return out
 }
 
+// hopSet gathers the authors the followed authors follow.
+type hopSet struct {
+	mu   sync.Mutex
+	keys map[string]struct{}
+	sem  chan struct{}
+}
+
 // refreshHop rebuilds the one-hop trust set from the followed authors' lists.
 func (l *nostrLive) refreshHop(ctx context.Context, authors []string) {
-	hop := map[string]struct{}{}
-	var mu sync.Mutex
-	sem := make(chan struct{}, 8)
+	hop := &hopSet{keys: map[string]struct{}{}, sem: make(chan struct{}, 8)}
 	var wg sync.WaitGroup
 	for _, pk := range authors {
-		sem <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			fl := l.bridge.followList(ctx, pk)
-			mu.Lock()
-			for _, f := range fl {
-				hop[f] = struct{}{}
-			}
-			mu.Unlock()
-		})
+		hop.sem <- struct{}{}
+		wg.Add(1)
+		go l.addFollowsOf(ctx, &wg, pk, hop)
 	}
 	wg.Wait()
 	l.mu.Lock()
-	l.hop = hop
+	l.hop = hop.keys
 	l.mu.Unlock()
+}
+
+func (l *nostrLive) addFollowsOf(ctx context.Context, wg *sync.WaitGroup, pk string, hop *hopSet) {
+	defer wg.Done()
+	fl := l.bridge.followList(ctx, pk)
+	hop.mu.Lock()
+	for _, f := range fl {
+		hop.keys[f] = struct{}{}
+	}
+	hop.mu.Unlock()
+	<-hop.sem
 }
 
 func (l *nostrLive) allow(pk string) bool {
@@ -271,17 +280,19 @@ func (l *nostrLive) onEvent(ev nostrEvent) {
 		return
 	}
 	l.bridge.authors.Add(ev.ID, ev.PubKey)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), nostrPushTimeout)
-		defer cancel()
-		ts := []tweet{t}
-		l.bridge.names(ctx, ts)
-		for _, f := range followers {
-			if err := l.push(f, ts[0]); err != nil {
-				netLog("").Warnf("nostr: push %s to %s: %v", ev.ID, f, err)
-			}
+	go l.pushToFollowers(t, followers)
+}
+
+func (l *nostrLive) pushToFollowers(t tweet, followers []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), nostrPushTimeout)
+	defer cancel()
+	ts := []tweet{t}
+	l.bridge.names(ctx, ts)
+	for _, f := range followers {
+		if err := l.push(f, ts[0]); err != nil {
+			netLog("").Warnf("nostr: push %s to %s: %v", t.Id, f, err)
 		}
-	}()
+	}
 }
 
 // runScanner rebuilds the follow graph from Warpnet: every native user's

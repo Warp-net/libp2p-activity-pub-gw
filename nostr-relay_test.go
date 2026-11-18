@@ -116,27 +116,40 @@ func (r *fakeRelay) liveFor(pk string) bool {
 	return false
 }
 
+// fakeConn serializes writes to one client.
+type fakeConn struct {
+	ctx context.Context
+	c   *websocket.Conn
+	mu  sync.Mutex
+}
+
+func (fc *fakeConn) send(v any) {
+	bt, _ := json.Marshal(v)
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	_ = fc.c.Write(fc.ctx, websocket.MessageText, bt)
+}
+
+func (r *fakeRelay) dropSubs(mine map[string]*fakeSub) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range mine {
+		delete(r.subs, s)
+	}
+}
+
+func libNewestFirst(a, b nostr.Event) int { return int(b.CreatedAt - a.CreatedAt) }
+
 func (r *fakeRelay) serve(w http.ResponseWriter, req *http.Request) {
 	c, err := websocket.Accept(w, req, nil)
 	if err != nil {
 		return
 	}
 	ctx := req.Context()
-	var wmu sync.Mutex
-	send := func(v any) {
-		bt, _ := json.Marshal(v)
-		wmu.Lock()
-		defer wmu.Unlock()
-		_ = c.Write(ctx, websocket.MessageText, bt)
-	}
+	conn := &fakeConn{ctx: ctx, c: c}
+	send := conn.send
 	mine := map[string]*fakeSub{}
-	defer func() {
-		r.mu.Lock()
-		for _, s := range mine {
-			delete(r.subs, s)
-		}
-		r.mu.Unlock()
-	}()
+	defer r.dropSubs(mine)
 	for {
 		_, data, err := c.Read(ctx)
 		if err != nil {
@@ -198,7 +211,7 @@ func (r *fakeRelay) stored(filters []nostr.Filter) []nostr.Event {
 				matched = append(matched, ev)
 			}
 		}
-		slices.SortFunc(matched, func(a, b nostr.Event) int { return int(b.CreatedAt - a.CreatedAt) })
+		slices.SortFunc(matched, libNewestFirst)
 		if f.Limit > 0 && len(matched) > f.Limit {
 			matched = matched[:f.Limit]
 		}
