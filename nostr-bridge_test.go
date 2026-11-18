@@ -306,3 +306,48 @@ func TestRelayURLGuard(t *testing.T) {
 type trustedKeys map[string]bool
 
 func (k trustedKeys) has(pk string) bool { return k[pk] }
+
+func TestNostrFeedCursorFollowsTheKeptNotes(t *testing.T) {
+	recent, archive := newFakeRelay(t), newFakeRelay(t)
+	alice := newNostrKey()
+	now := time.Now().Unix()
+	shared := alice.sign(t, kindNote, "newest", now-1)
+	recent.add(shared, alice.sign(t, kindNote, "second", now-2), alice.sign(t, kindNote, "third", now-3))
+	archive.add(shared, alice.sign(t, kindNote, "ancient", now-1000), alice.sign(t, kindNote, "older", now-1001))
+	b := testNostrBridge(t, recent, archive)
+
+	limit := uint64(2)
+	page, err := b.GetTweets(testCtx(t), alice.handle(), &limit, nil)
+	if err != nil {
+		t.Fatalf("GetTweets: %v", err)
+	}
+	if len(page.Tweets) != 2 || page.Tweets[0].Text != "newest" || page.Tweets[1].Text != "second" {
+		t.Fatalf("page = %+v", page.Tweets)
+	}
+	next, _ := b.GetTweets(testCtx(t), alice.handle(), &limit, &page.Cursor)
+	if len(next.Tweets) == 0 || next.Tweets[0].Text != "third" {
+		t.Fatalf("next page = %+v, want it to continue at the third note", next.Tweets)
+	}
+}
+
+func TestNostrFetchDoesNotWaitForAStalledRelay(t *testing.T) {
+	fast, stalled := newFakeRelay(t), newFakeRelay(t)
+	fast.counting = true
+	stalled.stalled = true
+	alice := newNostrKey()
+	fast.add(alice.sign(t, kindNote, "hi", time.Now().Unix()))
+	pool := testRelayPool()
+	urls := []string{fast.url(), stalled.url()}
+
+	start := time.Now()
+	evs := pool.fetch(testCtx(t), urls, nostrFilter{Authors: []string{alice.pk}})
+	if len(evs) != 1 {
+		t.Fatalf("fetched %d events", len(evs))
+	}
+	if took := time.Since(start); took > 3*relayGrace {
+		t.Fatalf("took %s, want the stalled relay cut off after the grace period", took)
+	}
+	if pool.down.Contains(stalled.url()) {
+		t.Fatal("a relay cut off by the grace period must not be marked down")
+	}
+}

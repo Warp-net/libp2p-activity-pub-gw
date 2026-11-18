@@ -319,7 +319,12 @@ func (b *nostrBridge) GetTweets(ctx context.Context, handle string, limit *uint6
 			f.Until = until
 		}
 	}
+	// Each relay returns its own n newest; merged, they cover different spans,
+	// so only the n newest overall are contiguous and the cursor follows them.
 	evs := b.relays.fetch(ctx, b.authorRelays(ctx, pk), f)
+	if len(evs) > n {
+		evs = evs[:n]
+	}
 	resp := tweetsResponse{UserId: handle, Tweets: []tweet{}}
 	if len(evs) > 0 {
 		resp.Cursor = strconv.FormatInt(evs[len(evs)-1].CreatedAt-1, 10)
