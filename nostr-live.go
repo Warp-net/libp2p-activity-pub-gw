@@ -43,17 +43,16 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// nostrResubscribeDelay lets a burst of follows settle into one resubscription.
-var nostrResubscribeDelay = 5 * time.Second
-
 const (
-	nostrHopRefresh     = 30 * time.Minute
-	nostrScanInterval   = 30 * time.Minute
-	nostrLiveMaxAuthors = 1000
-	nostrLiveMaxRelays  = 30
-	nostrPushTimeout    = time.Minute
-	nostrAuthorRate     = rate.Limit(1.0 / 6) // one note per 6s per author
-	nostrAuthorBurst    = 5
+	// nostrResubscribeDelay lets a burst of follows settle into one resubscription.
+	nostrResubscribeDelay = 5 * time.Second
+	nostrHopRefresh       = 30 * time.Minute
+	nostrScanInterval     = 30 * time.Minute
+	nostrLiveMaxAuthors   = 1000
+	nostrLiveMaxRelays    = 30
+	nostrPushTimeout      = time.Minute
+	nostrAuthorRate       = rate.Limit(1.0 / 6) // one note per 6s per author
+	nostrAuthorBurst      = 5
 )
 
 type nostrLive struct {
@@ -65,6 +64,11 @@ type nostrLive struct {
 	hop     map[string]struct{}            // authors the followed authors follow
 	changed chan struct{}
 	limits  *expirable.LRU[string, *rate.Limiter]
+	// pushed remembers delivered notes: while a subscription is re-opened the
+	// old and the new one overlap and both carry the same note.
+	pushed *expirable.LRU[string, struct{}]
+
+	resubscribeDelay time.Duration
 }
 
 func newNostrLive(bridge *nostrBridge, push func(follower string, t tweet) error) *nostrLive {
@@ -75,6 +79,9 @@ func newNostrLive(bridge *nostrBridge, push func(follower string, t tweet) error
 		hop:     map[string]struct{}{},
 		changed: make(chan struct{}, 1),
 		limits:  expirable.NewLRU[string, *rate.Limiter](nostrCacheSize, nil, time.Hour),
+		pushed:  expirable.NewLRU[string, struct{}](nostrCacheSize, nil, time.Hour),
+
+		resubscribeDelay: nostrResubscribeDelay,
 	}
 }
 
@@ -200,7 +207,7 @@ func (l *nostrLive) run(ctx context.Context) {
 		case <-l.changed:
 			select {
 			case <-ctx.Done():
-			case <-time.After(nostrResubscribeDelay):
+			case <-time.After(l.resubscribeDelay):
 			}
 		case <-time.After(nostrHopRefresh):
 		}
@@ -268,7 +275,7 @@ func (l *nostrLive) onEvent(ev nostrEvent) {
 		return
 	}
 	followers := l.followersOf(ev.PubKey)
-	if len(followers) == 0 {
+	if len(followers) == 0 || !l.firstSight(ev.ID) {
 		return
 	}
 	if !l.allow(ev.PubKey) {
@@ -281,6 +288,16 @@ func (l *nostrLive) onEvent(ev nostrEvent) {
 	}
 	l.bridge.authors.Add(ev.ID, ev.PubKey)
 	go l.pushToFollowers(t, followers)
+}
+
+func (l *nostrLive) firstSight(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.pushed.Contains(id) {
+		return false
+	}
+	l.pushed.Add(id, struct{}{})
+	return true
 }
 
 func (l *nostrLive) pushToFollowers(t tweet, followers []string) {

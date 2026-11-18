@@ -78,7 +78,6 @@ type liveWatch struct {
 func (w liveWatch) ready() bool { return w.relay.liveFor(w.pk) }
 
 func TestNostrLivePushesFollowedNotes(t *testing.T) {
-	nostrResubscribeDelay = 10 * time.Millisecond
 	relay := newFakeRelay(t)
 	alice, bob, carol, stranger := newNostrKey(), newNostrKey(), newNostrKey(), newNostrKey()
 	relay.add(alice.sign(t, kindFollowList, "", time.Now().Unix(), []string{"p", bob.pk}))
@@ -86,6 +85,7 @@ func TestNostrLivePushesFollowedNotes(t *testing.T) {
 
 	rec := &pushRecorder{}
 	live := newNostrLive(b, rec.push)
+	live.resubscribeDelay = 10 * time.Millisecond
 	b.trusted = live.trusted
 
 	live.setFollow("01WARPUSER", alice.handle(), false)

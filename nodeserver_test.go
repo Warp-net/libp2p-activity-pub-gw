@@ -80,6 +80,12 @@ func newNodeFixture(t *testing.T) *nodeFixture {
 
 	server := newTestNode(t, "srv-"+t.Name())
 	client := newTestNode(t, "cli-"+t.Name())
+	// The Nostr bridge is on, as in production, so Mastodon and Threads routes
+	// are exercised next to it; a request it wrongly claimed would reach this
+	// dead relay and fail.
+	t.Setenv("GATEWAY_NOSTR_RELAYS", "ws://127.0.0.1:1")
+	g.nostrRelays = testRelayPool()
+	g.nostrLive = newNostrLive(newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), "", g.host), g.pushTimeline)
 	server.serveRoutes(g, defaultOwnerHandle)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
