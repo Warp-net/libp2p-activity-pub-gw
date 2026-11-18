@@ -74,8 +74,12 @@ type nostrRelays interface {
 }
 
 const (
-	relayDialTimeout  = 7 * time.Second
-	relayEOSETimeout  = 6 * time.Second
+	relayDialTimeout = 4 * time.Second
+	relayEOSETimeout = 5 * time.Second
+	// relayGrace is how long the rest get once half the relays have answered
+	// in full: the relays are redundant, so the slowest is not worth waiting
+	// for, but the first to answer is often an index relay with nothing to say.
+	relayGrace        = time.Second
 	relayDownTTL      = time.Minute
 	relayMaxPerFetch  = 500
 	relayRetryBackoff = 30 * time.Second
@@ -136,7 +140,9 @@ func (p *relayPool) relay(ctx context.Context, raw string) (*nostr.Relay, string
 	err := r.ConnectWithClient(dctx, p.client)
 	cancel()
 	if err != nil {
-		p.down.Add(url, struct{}{})
+		if ctx.Err() == nil { // a dial cut short by the caller says nothing about the relay
+			p.down.Add(url, struct{}{})
+		}
 		netLog("").Debugf("nostr: relay %s: %v", url, err)
 		return nil, "", false
 	}
@@ -196,19 +202,57 @@ func (p *relayPool) fetch(ctx context.Context, urls []string, f nostrFilter) []n
 	if !ok {
 		return nil
 	}
+	urls = dedupeStrings(urls)
 	set := &eventSet{seen: map[string]bool{}}
+	fctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
+	defer cancel()
+	answered := make(chan struct{}, len(urls))
 	var wg sync.WaitGroup
-	for _, u := range dedupeStrings(urls) {
+	for _, u := range urls {
 		wg.Add(1)
-		go p.fetchFrom(ctx, &wg, u, filter, set)
+		go p.fetchFrom(fctx, &wg, u, filter, set, answered)
 	}
-	wg.Wait()
+	awaitRelays(fctx, cancel, &wg, answered, (len(urls)+1)/2)
+	set.mu.Lock()
+	defer set.mu.Unlock()
 	slices.SortFunc(set.out, newestFirst)
-	return set.out
+	return append([]nostrEvent{}, set.out...)
 }
 
-// fetchFrom reads one relay's stored events into set until EOSE.
-func (p *relayPool) fetchFrom(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, set *eventSet) {
+// awaitRelays returns once every relay is done, or relayGrace after quorum of
+// them answered in full, cancelling the stragglers.
+func awaitRelays(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, answered chan struct{}, quorum int) {
+	all := make(chan struct{})
+	go closeWhenDone(wg, all)
+	for n := 0; n < quorum; n++ {
+		select {
+		case <-all:
+			return
+		case <-ctx.Done():
+			cancel()
+			<-all
+			return
+		case <-answered:
+		}
+	}
+	select {
+	case <-all:
+		return
+	case <-ctx.Done():
+	case <-time.After(relayGrace):
+	}
+	cancel()
+	<-all
+}
+
+func closeWhenDone(wg *sync.WaitGroup, ch chan struct{}) {
+	wg.Wait()
+	close(ch)
+}
+
+// fetchFrom reads one relay's stored events into set until EOSE, then
+// reports the relay as answered.
+func (p *relayPool) fetchFrom(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, set *eventSet, answered chan<- struct{}) {
 	defer wg.Done()
 	r, url, ok := p.relay(ctx, raw)
 	if !ok {
@@ -228,6 +272,7 @@ func (p *relayPool) fetchFrom(ctx context.Context, wg *sync.WaitGroup, raw strin
 			}
 			set.add(ev)
 		case <-sub.EndOfStoredEvents:
+			answered <- struct{}{}
 			return
 		case <-sub.ClosedReason:
 			return
@@ -251,16 +296,23 @@ func (p *relayPool) count(ctx context.Context, urls []string, f nostrFilter) (in
 	if !ok {
 		return 0, false
 	}
+	urls = dedupeStrings(urls)
 	res := &countResult{}
+	cctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
+	defer cancel()
 	var wg sync.WaitGroup
-	for _, u := range dedupeStrings(urls) {
+	for _, u := range urls {
 		wg.Add(1)
-		go p.countAt(ctx, &wg, u, filter, res)
+		go p.countAt(cctx, &wg, u, filter, res)
 	}
 	wg.Wait()
+	res.mu.Lock()
+	defer res.mu.Unlock()
 	return res.best, res.answered
 }
 
+// countAt asks one relay; counts take the largest answer, so every relay is
+// waited for within the budget.
 func (p *relayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, res *countResult) {
 	defer wg.Done()
 	r, url, ok := p.relay(ctx, raw)
@@ -268,9 +320,7 @@ func (p *relayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string,
 		return
 	}
 	defer p.release(url)
-	cctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
-	defer cancel()
-	n, _, err := r.Count(cctx, filter, nostr.SubscriptionOptions{})
+	n, _, err := r.Count(ctx, filter, nostr.SubscriptionOptions{})
 	if err != nil {
 		return
 	}

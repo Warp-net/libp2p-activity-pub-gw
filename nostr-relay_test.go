@@ -49,6 +49,8 @@ type fakeRelay struct {
 	t        *testing.T
 	srv      *httptest.Server
 	counting bool
+	// stalled relays accept requests and never answer them.
+	stalled bool
 
 	mu     sync.Mutex
 	events []nostr.Event
@@ -172,6 +174,9 @@ func (r *fakeRelay) serve(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
 		r.reqs = append(r.reqs, string(data))
 		r.mu.Unlock()
+		if r.stalled {
+			continue
+		}
 		switch typ {
 		case "REQ":
 			for _, ev := range r.stored(filters) {
