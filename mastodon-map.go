@@ -111,7 +111,16 @@ func networkOfHandle(handle string) string {
 // isBridgedNetwork reports whether a Warpnet User.Network tag names a network
 // bridged in through this gateway rather than Warpnet itself.
 func isBridgedNetwork(network string) bool {
-	return network == mastodonNetwork || network == threadsNetwork
+	return network == mastodonNetwork || network == threadsNetwork || network == nostrNetwork
+}
+
+// mostrHost bridges the Fediverse into Nostr; its accounts are duplicates of
+// Fediverse ones the gateway already reaches directly.
+const mostrHost = "mostr.pub"
+
+func isMostrHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == mostrHost || strings.HasSuffix(host, "."+mostrHost)
 }
 
 // restAccountToUser renders a Mastodon REST account as a Warpnet user — the
