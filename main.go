@@ -69,7 +69,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.114"
+const gatewayVersion = "0.1.115"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -205,6 +205,13 @@ func main() {
 	// the same handlers.
 	for _, c := range clients {
 		c.serveRoutes(g, defaultOwnerHandle)
+	}
+	for _, pub := range g.nostrPublishers() {
+		for _, c := range clients {
+			if c.network == pub.network {
+				go newNostrOutbound(appCtx, c, pub).runScanner(defaultOwnerHandle)
+			}
+		}
 	}
 
 	// Outbound federation follows the graph: when a Warpnet user gains a

@@ -275,12 +275,17 @@ func (p *nostrPublisher) DeleteReply(ev deleteTweetEvent) {
 	if !ok {
 		return
 	}
-	proxy := p.statusURL(ev.UserId, ev.TweetId)
 	relays := p.bridge.relaysFor(ctx, parent)
-	var tags [][]string
-	for _, own := range p.bridge.relays.fetch(ctx, relays, nostrFilter{
+	p.deleteProxied(ctx, sk, p.statusURL(ev.UserId, ev.TweetId), relays, nostrFilter{
 		Kinds: []int{kindNote}, Authors: []string{pk}, Tags: map[string][]string{"e": {parent}}, Limit: nostrBoundedFetch,
-	}) {
+	})
+}
+
+// deleteProxied publishes a kind 5 for the user's notes matching f that
+// carry the proxy id of one Warpnet tweet; an edited tweet has several.
+func (p *nostrPublisher) deleteProxied(ctx context.Context, sk [32]byte, proxy string, relays []string, f nostrFilter) {
+	var tags [][]string
+	for _, own := range p.bridge.relays.fetch(ctx, append(append([]string{}, p.bridge.defaults...), relays...), f) {
 		if id, _ := proxiedFrom(own); id == proxy {
 			tags = append(tags, []string{"e", own.ID})
 		}
@@ -400,4 +405,118 @@ func (c *nodeClient) followings(userID string) ([]string, bool) {
 		cursor = &next
 	}
 	return nil, false
+}
+
+// PublishPost publishes a consenting user's own top-level post as a kind 1.
+// An edit arrives again under the same id and is published as a new note;
+// the earlier version stays.
+func (p *nostrPublisher) PublishPost(owner string, t tweet) {
+	if p == nil || !nostrPublishablePost(t, owner) {
+		return
+	}
+	ctx, cancel := p.begin()
+	defer p.end(cancel)
+	sk, _, ok := p.signer(owner)
+	if !ok {
+		return
+	}
+	content := strings.TrimSpace(t.Text)
+	if t.Poll != nil {
+		for _, o := range t.Poll.Options {
+			content += "\n• " + o
+		}
+	}
+	for _, key := range t.ImageKeys {
+		content += "\n" + p.mediaURL(owner, key)
+	}
+	tags := [][]string{p.proxyTag(owner, t.Id)}
+	if t.QuotedTweetId != nil && isNostrEventID(*t.QuotedTweetId) {
+		if note, ok := p.target(ctx, *t.QuotedTweetId); ok {
+			content += "\n\nnostr:" + encodeNevent(note.ID, note.PubKey)
+			tags = append(tags, []string{"q", note.ID, "", note.PubKey}, []string{"p", note.PubKey})
+		}
+	}
+	if content = strings.TrimSpace(content); content == "" {
+		return
+	}
+	p.send(ctx, sk, nostrEvent{Kind: kindNote, Content: content, Tags: tags}, nil)
+}
+
+// DeletePost asks relays to drop every published version of a post.
+func (p *nostrPublisher) DeletePost(owner, tweetID string) {
+	if p == nil {
+		return
+	}
+	ctx, cancel := p.begin()
+	defer p.end(cancel)
+	sk, pk, ok := p.signer(owner)
+	if !ok {
+		return
+	}
+	p.deleteProxied(ctx, sk, p.statusURL(owner, tweetID), nil, nostrFilter{
+		Kinds: []int{kindNote}, Authors: []string{pk}, Limit: nostrBoundedFetch,
+	})
+}
+
+// PublishProfile publishes the user's kind 0 and kind 10002 relay list, and
+// returns the kind 0 content so the caller republishes only on a change.
+func (p *nostrPublisher) PublishProfile(owner, last string) string {
+	if p == nil {
+		return last
+	}
+	ctx, cancel := p.begin()
+	defer p.end(cancel)
+	sk, _, ok := p.signer(owner)
+	if !ok {
+		return last
+	}
+	u, ok := p.home.homeUser(owner)
+	if !ok {
+		return last
+	}
+	content := p.profileContent(owner, u)
+	if content == last {
+		return last
+	}
+	p.send(ctx, sk, nostrEvent{Kind: kindProfile, Content: content, Tags: [][]string{
+		{"proxy", p.baseURL + pathUsers + owner, "web"},
+	}}, nil)
+	relays := make([][]string, 0, len(p.bridge.defaults))
+	for _, r := range p.bridge.defaults {
+		relays = append(relays, []string{"r", r})
+	}
+	p.send(ctx, sk, nostrEvent{Kind: kindRelayList, Tags: relays}, nil)
+	return content
+}
+
+func (p *nostrPublisher) profileContent(owner string, u user) string {
+	prof := map[string]string{
+		"name":         firstNonEmpty(u.Username, owner),
+		"display_name": firstNonEmpty(u.Username, owner),
+		"about":        u.Bio,
+		"nip05":        strings.ToLower(owner) + "@" + strings.TrimPrefix(p.baseURL, "https://"),
+	}
+	if u.AvatarKey != "" {
+		prof["picture"] = p.mediaURL(owner, u.AvatarKey)
+	}
+	if u.BackgroundImageKey != "" {
+		prof["banner"] = p.mediaURL(owner, u.BackgroundImageKey)
+	}
+	if u.Website != nil && *u.Website != "" {
+		prof["website"] = *u.Website
+	}
+	bt, _ := json.Marshal(prof)
+	return string(bt)
+}
+
+// mediaURL serves a Warpnet image through the gateway's media proxy; the link
+// breaks if the gateway host ever changes, which is accepted.
+func (p *nostrPublisher) mediaURL(owner, key string) string {
+	return p.baseURL + pathMedia + encodeMediaRef(owner, key)
+}
+
+// nostrPublishablePost is an original top-level post by owner that is not
+// sponsored; replies, retweets and paid content never leave as posts.
+func nostrPublishablePost(t tweet, owner string) bool {
+	return publishableTweet(t, owner) && t.Price == nil && !t.IsSponsored()
 }
