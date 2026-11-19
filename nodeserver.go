@@ -65,7 +65,7 @@ type routeHandler func(ctx context.Context, body []byte) (any, error)
 // account advertised as the node owner.
 func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 	b := newMastodonBridge(g, c.h.ID().String())
-	nb := g.newNostrBridge(c.h.ID().String())
+	nb := g.newNostrBridge(c)
 
 	handlers := map[string]routeHandler{
 		event.PUBLIC_GET_INFO: c.infoHandler(ownerHandle),
@@ -144,6 +144,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 				return nil, err
 			}
 			if nb.serves(string(ev.TweetId)) {
+				go nb.pub.React(string(ev.OwnerId), string(ev.TweetId), emoji, false)
 				return reactionsCount(emoji, 0), nil
 			}
 			count, rerr := b.React(ctx, string(ev.OwnerId), string(ev.TweetId), emoji, false)
@@ -153,6 +154,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		// and always federates as an Undo(Like).
 		routePostUnreact: wrapJSON(func(ctx context.Context, ev reactionEvent) (any, error) {
 			if nb.serves(string(ev.TweetId)) {
+				go nb.pub.React(string(ev.OwnerId), string(ev.TweetId), "", true)
 				return reactionsCount("", 0), nil
 			}
 			count, err := b.React(ctx, string(ev.OwnerId), string(ev.TweetId), "", true)
@@ -161,6 +163,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		routePostFollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
 			if nb.serves(string(ev.FollowingId)) {
 				g.nostrLive.setFollow(string(ev.FollowerId), string(ev.FollowingId), false)
+				go nb.pub.Follow(string(ev.FollowerId), string(ev.FollowingId), false)
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), false)
@@ -168,6 +171,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		routePostUnfollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
 			if nb.serves(string(ev.FollowingId)) {
 				g.nostrLive.setFollow(string(ev.FollowerId), string(ev.FollowingId), true)
+				go nb.pub.Follow(string(ev.FollowerId), string(ev.FollowingId), true)
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), true)
@@ -182,12 +186,14 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			// Echo the reply back as the tweet the node stored, so the Warpnet
 			// UI renders it.
 			if nb.isReplyTo(ev) {
+				go nb.pub.Reply(ev)
 				return ev, nil
 			}
 			return ev, b.Reply(ctx, ev)
 		}),
 		routePostReply: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
 			if nb.isReplyTo(ev) {
+				go nb.pub.Reply(ev)
 				return ev, nil
 			}
 			return ev, b.Reply(ctx, ev)
@@ -206,19 +212,29 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		// private delete route; federate it as an AP Delete. Only a reply (a
 		// parent set) targets a Mastodon note; anything else is acknowledged.
 		routeDeleteTweet: wrapJSON(func(ctx context.Context, ev deleteTweetEvent) (any, error) {
-			if ev.ParentId == "" && ev.RootId == "" || nb.serves(ev.ParentId) || nb.serves(ev.RootId) {
+			if nb.serves(ev.ParentId) || nb.serves(ev.RootId) {
+				go nb.pub.DeleteReply(ev)
+				return struct{}{}, nil
+			}
+			if ev.ParentId == "" && ev.RootId == "" {
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Delete(ctx, ev)
 		}),
 		routePostRetweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
+			if ev.QuotedTweetId != nil && nb.serves(*ev.QuotedTweetId) {
+				go nb.pub.Quote(ev)
+				return ev, nil
+			}
 			if nb.serves(retweetObject(ev)) {
+				go nb.pub.Repost(retweeterOf(ev), retweetObject(ev), false)
 				return ev, nil
 			}
 			return ev, b.Announce(ctx, retweeterOf(ev), retweetObject(ev), false)
 		}),
 		routePostUnretweet: wrapJSON(func(ctx context.Context, ev unretweetEvent) (any, error) {
 			if nb.serves(string(ev.TweetId)) {
+				go nb.pub.Repost(string(ev.RetweeterId), string(ev.TweetId), true)
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Announce(ctx, string(ev.RetweeterId), string(ev.TweetId), true)

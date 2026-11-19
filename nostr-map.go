@@ -51,6 +51,7 @@ const (
 	kindNote          = 1
 	kindFollowList    = 3
 	kindLegacyDM      = 4
+	kindDelete        = 5
 	kindRepost        = 6
 	kindReaction      = 7
 	kindGenericRepost = 16
@@ -349,6 +350,11 @@ func reactionEmoji(content string) (string, bool) {
 	emoji, err := normalizeReaction(content)
 	return emoji, err == nil && !strings.Contains(emoji, ":")
 }
+
+// retweetPrefix marks a Warpnet retweet id wrapping the original's.
+const retweetPrefix = domain.RetweetPrefix
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 func truncateUTF8(s string, limit int) string {
 	if len(s) <= limit {

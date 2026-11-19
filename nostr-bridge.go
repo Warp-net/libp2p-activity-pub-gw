@@ -33,6 +33,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -91,6 +92,13 @@ type nostrBridge struct {
 	// trusted reports whether an author's replies, reactions and reposts may
 	// enter Warpnet (see nostrLive.trusted); nil trusts nobody.
 	trusted func(pk string) bool
+
+	// keys recognise the gateway's own npubs and home reads their native
+	// accounts; pub writes to Nostr. All nil while the bridge is read-only.
+	keys    *nostrKeys
+	home    homeUserReader
+	network string
+	pub     *nostrPublisher
 
 	profiles   *expirable.LRU[string, nostrEvent]
 	relayLists *expirable.LRU[string, []string]
@@ -194,7 +202,15 @@ func (b *nostrBridge) getUser(ctx context.Context, handle string, withCounts boo
 	if !ok {
 		return user{}, errNostrNotFound
 	}
+	if u, ok := b.native(pk, ""); ok {
+		return u, nil
+	}
 	p, ok := b.profile(ctx, pk)
+	if ok {
+		if u, own := b.native(pk, selfProxiedUser(p, b.selfHost)); own {
+			return u, nil
+		}
+	}
 	if !ok || droppedNostrEvent(p, b.selfHost) {
 		return user{}, errNostrNotFound
 	}
@@ -258,7 +274,7 @@ func (b *nostrBridge) GetFollowings(ctx context.Context, handle string, _ *strin
 	if !ok {
 		return followingsResponse{}, errNostrNotFound
 	}
-	return followingsResponse{FollowerId: handle, Followings: handlesOf(b.followList(ctx, pk))}, nil
+	return followingsResponse{FollowerId: handle, Followings: b.handlesOf(b.followList(ctx, pk))}, nil
 }
 
 // GetFollowers approximates the followers as the authors of kind 3 lists that
@@ -277,12 +293,54 @@ func (b *nostrBridge) GetFollowers(ctx context.Context, handle string, _ *string
 			pks = append(pks, ev.PubKey)
 		}
 	}
-	return followersResponse{FollowingId: handle, Followers: handlesOf(dedupeStrings(pks))}, nil
+	return followersResponse{FollowingId: handle, Followers: b.handlesOf(dedupeStrings(pks))}, nil
 }
 
-func handlesOf(pks []string) []string {
+// native resolves one of the gateway's own npubs to the Warpnet account it
+// was derived for, named either by the keys derived so far or by claimed, a
+// user id the derivation must confirm.
+func (b *nostrBridge) native(pk, claimed string) (user, bool) {
+	if b.home == nil {
+		return user{}, false
+	}
+	o, ok := b.keys.owner(pk)
+	if !ok || o.network != b.network {
+		if claimed == "" || !b.keys.isOwn(pk, b.network, claimed) {
+			return user{}, false
+		}
+		o = ownedKey{network: b.network, userID: claimed}
+	}
+	return b.home.homeUser(o.userID)
+}
+
+// selfProxiedUser is the Warpnet user id a profile claims through a NIP-48
+// proxy tag pointing at this gateway.
+func selfProxiedUser(ev nostrEvent, selfHost string) string {
+	id, protocol := proxiedFrom(ev)
+	if protocol != "web" {
+		return ""
+	}
+	u, err := url.Parse(id)
+	if err != nil || !strings.EqualFold(u.Hostname(), selfHost) {
+		return ""
+	}
+	rest, ok := strings.CutPrefix(u.Path, pathUsers)
+	if !ok {
+		return ""
+	}
+	userID, _, _ := strings.Cut(rest, "/")
+	return userID
+}
+
+// handlesOf names accounts by their Warpnet id: a Nostr handle, or the
+// native id of one of the gateway's own keys.
+func (b *nostrBridge) handlesOf(pks []string) []string {
 	out := make([]string, 0, len(pks))
 	for _, pk := range pks {
+		if o, ok := b.keys.owner(pk); ok && o.network == b.network {
+			out = append(out, o.userID)
+			continue
+		}
 		if h := nostrHandle(pk); h != "" {
 			out = append(out, h)
 		}
@@ -508,19 +566,23 @@ func (b *nostrBridge) serves(id string) bool {
 }
 
 // isReplyTo reports whether ev replies to a Nostr note. Interactions with Nostr
-// content stay inside Warpnet until publishing to Nostr is enabled; they are
-// acknowledged so the node keeps them.
+// content are acknowledged at once so the node keeps them, and published to
+// Nostr in the background when the author consented.
 func (b *nostrBridge) isReplyTo(ev tweet) bool {
 	return ev.ParentId != nil && b.serves(*ev.ParentId) || b.serves(ev.RootId)
 }
 
 // newNostrBridge serves Nostr reads as nodeID; nil when the bridge is off.
-func (g *gateway) newNostrBridge(nodeID string) *nostrBridge {
+func (g *gateway) newNostrBridge(c *nodeClient) *nostrBridge {
 	if g.nostrRelays == nil {
 		return nil
 	}
-	nb := newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), nodeID, g.host)
+	nb := newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), c.h.ID().String(), g.host)
 	nb.trusted = g.nostrLive.trusted
+	nb.keys, nb.home, nb.network = g.nostrKeys, c, c.network
+	if g.nostrPublish && g.nostrKeys != nil {
+		nb.pub = newNostrPublisher(g.nostrKeys, nb, c, c.network, g.baseURL())
+	}
 	return nb
 }
 

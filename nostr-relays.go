@@ -32,6 +32,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"net/http"
 	"slices"
 	"strings"
@@ -50,6 +51,7 @@ type nostrEvent struct {
 	Kind      int
 	Tags      [][]string
 	Content   string
+	Sig       string
 }
 
 type nostrFilter struct {
@@ -71,6 +73,8 @@ type nostrRelays interface {
 	count(ctx context.Context, urls []string, f nostrFilter) (int64, bool)
 	// subscribe streams new events matching f until ctx ends, reconnecting.
 	subscribe(ctx context.Context, urls []string, f nostrFilter, on func(nostrEvent))
+	// publish sends a signed event and reports how many relays accepted it.
+	publish(ctx context.Context, urls []string, ev nostrEvent) int
 }
 
 const (
@@ -445,7 +449,104 @@ func fromLibEvent(ev nostr.Event) nostrEvent {
 		Kind:      int(ev.Kind),
 		Tags:      tags,
 		Content:   ev.Content,
+		Sig:       nostr.HexEncodeToString(ev.Sig[:]),
 	}
+}
+
+func toLibEvent(ev nostrEvent) (nostr.Event, bool) {
+	out := nostr.Event{CreatedAt: nostr.Timestamp(ev.CreatedAt), Kind: nostr.Kind(ev.Kind), Content: ev.Content} //nolint:gosec // kinds are small
+	for _, t := range ev.Tags {
+		out.Tags = append(out.Tags, nostr.Tag(t))
+	}
+	if ev.ID != "" {
+		id, err := nostr.IDFromHex(ev.ID)
+		if err != nil {
+			return nostr.Event{}, false
+		}
+		out.ID = id
+	}
+	if ev.PubKey != "" {
+		pk, err := nostr.PubKeyFromHex(ev.PubKey)
+		if err != nil {
+			return nostr.Event{}, false
+		}
+		out.PubKey = pk
+	}
+	if ev.Sig != "" {
+		sig, err := hex.DecodeString(ev.Sig)
+		if err != nil || len(sig) != len(out.Sig) {
+			return nostr.Event{}, false
+		}
+		copy(out.Sig[:], sig)
+	}
+	return out, true
+}
+
+// signEvent stamps ev with the key's pubkey, id and BIP-340 signature.
+func signEvent(sk [32]byte, ev nostrEvent) (nostrEvent, bool) {
+	lib, ok := toLibEvent(ev)
+	if !ok || lib.Sign(sk) != nil {
+		return nostrEvent{}, false
+	}
+	return fromLibEvent(lib), true
+}
+
+// publicKeyHex is the x-only public key of sk.
+func publicKeyHex(sk [32]byte) string {
+	return nostr.GetPublicKey(sk).Hex()
+}
+
+// eventJSON is the canonical JSON of a signed event, as a repost embeds it.
+func eventJSON(ev nostrEvent) string {
+	lib, ok := toLibEvent(ev)
+	if !ok {
+		return ""
+	}
+	return lib.String()
+}
+
+// encodeNevent renders an event reference for a quote's text.
+func encodeNevent(id, authorHex string) string {
+	eid, err := nostr.IDFromHex(id)
+	if err != nil {
+		return ""
+	}
+	pk, _ := nostr.PubKeyFromHex(authorHex)
+	return nip19.EncodeNevent(eid, nil, pk)
+}
+
+func (p *relayPool) publish(ctx context.Context, urls []string, ev nostrEvent) int {
+	lib, ok := toLibEvent(ev)
+	if !ok {
+		return 0
+	}
+	urls = dedupeStrings(urls)
+	res := &countResult{}
+	var wg sync.WaitGroup
+	for _, u := range urls {
+		wg.Add(1)
+		go p.publishTo(ctx, &wg, u, lib, res)
+	}
+	wg.Wait()
+	return int(res.best)
+}
+
+func (p *relayPool) publishTo(ctx context.Context, wg *sync.WaitGroup, raw string, ev nostr.Event, res *countResult) {
+	defer wg.Done()
+	r, url, ok := p.relay(ctx, raw)
+	if !ok {
+		return
+	}
+	defer p.release(url)
+	pctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
+	defer cancel()
+	if err := r.Publish(pctx, ev); err != nil {
+		netLog("").Debugf("nostr: publish %s to %s: %v", ev.ID.Hex(), url, err)
+		return
+	}
+	res.mu.Lock()
+	res.best++
+	res.mu.Unlock()
 }
 
 // encodeNpub renders a hex public key as a bech32 npub.

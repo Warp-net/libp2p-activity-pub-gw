@@ -153,6 +153,10 @@ type gateway struct {
 	// authors Warpnet users follow; both nil disables the Nostr bridge.
 	nostrRelays nostrRelays
 	nostrLive   *nostrLive
+	// nostrKeys derive Warpnet users' Nostr keys; nostrPublish lets the
+	// bridge write with them.
+	nostrKeys    *nostrKeys
+	nostrPublish bool
 
 	// allowPrivateTargets disables the SSRF guard's loopback/private-range
 	// rejection for outbound delivery. Test-only; never set in main.go.

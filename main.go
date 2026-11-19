@@ -69,7 +69,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.113"
+const gatewayVersion = "0.1.114"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -177,6 +177,15 @@ func main() {
 	// the bridge off.
 	if os.Getenv("GATEWAY_DISABLE_NOSTR") == "" {
 		g.nostrRelays = newRelayPool(newSafeClient(0))
+		keys, kerr := nostrKeysFromEnv()
+		if kerr != nil {
+			log.Warnf("gateway: %v; Nostr keys are off", kerr)
+		}
+		g.nostrKeys = keys
+		// Writing to Nostr waits for the node-facing sender check; until it is
+		// in, GATEWAY_NOSTR_PUBLISH stays off.
+		g.nostrPublish = keys != nil && os.Getenv("GATEWAY_NOSTR_PUBLISH") == "true"
+		log.Infof("gateway: Nostr keys %v, publishing to Nostr %v", keys != nil, g.nostrPublish)
 		nb := newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), "", host)
 		g.nostrLive = newNostrLive(nb, g.pushTimeline)
 		nb.trusted = g.nostrLive.trusted

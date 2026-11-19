@@ -64,6 +64,8 @@ are required:
 | `GATEWAY_DISCOVERY_HOST` | Mastodon instance supplying who-to-follow candidates; empty disables discovery | `mastodon.social` |
 | `GATEWAY_NOSTR_RELAYS` | comma-separated `wss://` relays replacing the default Nostr relays | damus, primal, nos.lol, purplepag.es, user.kindpag.es |
 | `GATEWAY_DISABLE_NOSTR` | to switch the Nostr bridge off | on |
+| `GATEWAY_NOSTR_SECRET` | master secret (32+ bytes) users' Nostr keys are derived from; never stored or logged by the gateway. Losing it changes every npub, leaking it exposes every key | unset: no keys |
+| `GATEWAY_NOSTR_PUBLISH` | `true` publishes consenting users' replies, quotes, reactions, reposts and follow lists to Nostr. Keep it off until the gateway checks that a write comes from the user's home node | off |
 
 Who-to-follow uses the instance's public `/api/v1/directory` (`order=active`,
 `local=false`), cached in memory for five minutes. These are discovery candidates,
