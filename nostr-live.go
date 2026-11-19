@@ -327,8 +327,34 @@ func (l *nostrLive) runScanner(ctx context.Context, req nodeRequester, scanUser 
 }
 
 func (l *nostrLive) scan(req nodeRequester, scanUser string) {
+	for _, u := range nativeUsers(req, scanUser) {
+		fbt, ferr := req.requestUser(u.Id, routeGetFollowings, getFollowersEvent{UserId: u.Id})
+		if ferr != nil || nodeResponseError(fbt) != nil {
+			continue
+		}
+		var fr followingsResponse
+		if json.Unmarshal(fbt, &fr) != nil {
+			continue
+		}
+		pks := map[string]bool{}
+		for _, id := range fr.Followings {
+			if pk, ok := nostrPubKey(id); ok {
+				pks[pk] = true
+			}
+		}
+		// An empty read is not authoritative (see outboundFederation.scan).
+		if len(pks) > 0 {
+			l.setFollowings(u.Id, pks)
+		}
+	}
+}
+
+// nativeUsers pages through the Warpnet users a network knows, skipping
+// accounts bridged in from elsewhere.
+func nativeUsers(req nodeRequester, scanUser string) []user {
 	limit := federationScanPageSize
 	var cursor string
+	var out []user
 	for range federationScanMaxPages {
 		ev := getAllUsersEvent{UserId: scanUser, Limit: &limit}
 		if cursor != "" {
@@ -336,38 +362,21 @@ func (l *nostrLive) scan(req nodeRequester, scanUser string) {
 		}
 		bt, err := req.request(routeGetUsers, ev)
 		if err != nil {
-			return
+			return out
 		}
 		var resp usersResponse
 		if json.Unmarshal(bt, &resp) != nil {
-			return
+			return out
 		}
 		for _, u := range resp.Users {
-			if isBridgedNetwork(u.Network) || isBridgedUserID(u.Id) {
-				continue
-			}
-			fbt, ferr := req.requestUser(u.Id, routeGetFollowings, getFollowersEvent{UserId: u.Id})
-			if ferr != nil || nodeResponseError(fbt) != nil {
-				continue
-			}
-			var fr followingsResponse
-			if json.Unmarshal(fbt, &fr) != nil {
-				continue
-			}
-			pks := map[string]bool{}
-			for _, id := range fr.Followings {
-				if pk, ok := nostrPubKey(id); ok {
-					pks[pk] = true
-				}
-			}
-			// An empty read is not authoritative (see outboundFederation.scan).
-			if len(pks) > 0 {
-				l.setFollowings(u.Id, pks)
+			if !isBridgedNetwork(u.Network) && !isBridgedUserID(u.Id) {
+				out = append(out, u)
 			}
 		}
 		if len(resp.Users) == 0 || resp.Cursor == "" || resp.Cursor == cursor {
-			return
+			return out
 		}
 		cursor = resp.Cursor
 	}
+	return out
 }

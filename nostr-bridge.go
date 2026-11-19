@@ -32,7 +32,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -43,6 +45,7 @@ import (
 	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/oklog/ulid/v2"
 )
 
 var errNostrNotFound = errors.New("nostr: not found")
@@ -582,8 +585,45 @@ func (g *gateway) newNostrBridge(c *nodeClient) *nostrBridge {
 	nb.keys, nb.home, nb.network = g.nostrKeys, c, c.network
 	if g.nostrPublish && g.nostrKeys != nil {
 		nb.pub = newNostrPublisher(g.nostrKeys, nb, c, c.network, g.baseURL())
+		g.nostrMu.Lock()
+		g.nostrPubs = append(g.nostrPubs, nb.pub)
+		g.nostrMu.Unlock()
 	}
 	return nb
+}
+
+// nostrPublishers are the per-network publishers serveRoutes created.
+func (g *gateway) nostrPublishers() []*nostrPublisher {
+	g.nostrMu.Lock()
+	defer g.nostrMu.Unlock()
+	return append([]*nostrPublisher{}, g.nostrPubs...)
+}
+
+// handleNostrJSON serves NIP-05 for consenting Warpnet users: a user id is
+// <ulid>@<gateway host>, lower-cased as NIP-05 names are.
+func (g *gateway) handleNostrJSON(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	name := strings.ToLower(r.URL.Query().Get("name"))
+	if _, err := ulid.ParseStrict(name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	for _, pub := range g.nostrPublishers() {
+		if !pub.consents(strings.ToUpper(name)) {
+			continue
+		}
+		pk, ok := pub.keys.pubKey(pub.network, name)
+		if !ok {
+			continue
+		}
+		w.Header().Set(headerContentType, "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"names":  map[string]string{name: pk},
+			"relays": map[string][]string{pk: pub.bridge.defaults},
+		})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // pushTimeline delivers a followed Nostr author's note to a follower's node.

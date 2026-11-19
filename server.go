@@ -44,6 +44,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -157,6 +158,8 @@ type gateway struct {
 	// bridge write with them.
 	nostrKeys    *nostrKeys
 	nostrPublish bool
+	nostrMu      sync.Mutex
+	nostrPubs    []*nostrPublisher
 
 	// allowPrivateTargets disables the SSRF guard's loopback/private-range
 	// rejection for outbound delivery. Test-only; never set in main.go.
@@ -205,6 +208,7 @@ func (g *gateway) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/webfinger", g.handleWebFinger)
 	mux.HandleFunc("/.well-known/nodeinfo", g.handleNodeInfoLinks)
+	mux.HandleFunc("/.well-known/nostr.json", g.handleNostrJSON)
 	mux.HandleFunc("/nodeinfo/2.0", g.handleNodeInfo)
 	mux.HandleFunc(pathUsers, g.handleUsers)
 	mux.HandleFunc(pathActor, g.handleInstanceActor)
