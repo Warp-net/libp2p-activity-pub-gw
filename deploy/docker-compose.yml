@@ -16,6 +16,11 @@ services:
       - GATEWAY_DISCOVERY_HOST=${GATEWAY_DISCOVERY_HOST-mastodon.social}
       - GATEWAY_NOSTR_RELAYS=${GATEWAY_NOSTR_RELAYS:-}
       - GATEWAY_DISABLE_NOSTR=${GATEWAY_DISABLE_NOSTR:-}
+      # Master secret of users' Nostr keys (CI secret). Losing it changes every
+      # npub; leaking it exposes every key.
+      - GATEWAY_NOSTR_SECRET=${GATEWAY_NOSTR_SECRET:-}
+      # Writing to Nostr stays off until the node-facing sender check is in.
+      - GATEWAY_NOSTR_PUBLISH=${GATEWAY_NOSTR_PUBLISH:-}
       - GATEWAY_LOGS_TOKEN=${GATEWAY_LOGS_TOKEN:-}
       # Standalone plain-HTTP debug listener (/logs + /debug/pprof). With
       # network_mode host this binds directly on the droplet

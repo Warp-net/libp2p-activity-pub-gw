@@ -178,6 +178,14 @@ func (r *fakeRelay) serve(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		switch typ {
+		case "EVENT":
+			var ev nostr.Event
+			if ev.UnmarshalJSON(msg[1]) != nil || !ev.VerifySignature() {
+				send([]any{"OK", "", false, "invalid: bad signature"})
+				continue
+			}
+			r.add(ev)
+			send([]any{"OK", ev.ID.Hex(), true, ""})
 		case "REQ":
 			for _, ev := range r.stored(filters) {
 				send([]any{"EVENT", id, ev})
@@ -270,4 +278,17 @@ func testCtx(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// published returns the events of kind the relay was sent by pk.
+func (r *fakeRelay) published(pk string, kind int) []nostr.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []nostr.Event
+	for _, ev := range r.events {
+		if ev.PubKey.Hex() == pk && int(ev.Kind) == kind {
+			out = append(out, ev)
+		}
+	}
+	return out
 }

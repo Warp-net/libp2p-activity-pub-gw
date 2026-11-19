@@ -7,6 +7,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/Warp-net/libp2p-camouflage-transport v0.0.3
 	github.com/Warp-net/warpnet v0.8.51-0.20260929210213-7734196ebd16
+	github.com/btcsuite/btcd/btcec/v2 v2.3.4
 	github.com/filinvadim/ratelimiter v0.0.0-20250304112346-2ef3a2bd6f00
 	github.com/google/uuid v1.6.0
 	github.com/grokify/html-strip-tags-go v0.1.0
@@ -20,7 +21,6 @@ require (
 
 require (
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
-	github.com/btcsuite/btcd/btcec/v2 v2.3.4 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.5 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/cskr/pubsub v1.0.2 // indirect
