@@ -7,19 +7,21 @@ import (
 	"testing"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
 )
 
 func TestEnvOr(t *testing.T) {
 	const key = "GATEWAY_TEST_ENV_OR"
-	if got := envOr(key, "fallback"); got != "fallback" {
+	if got := warp.EnvOr(key, "fallback"); got != "fallback" {
 		t.Fatalf("unset = %q, want the default", got)
 	}
 	t.Setenv(key, "value")
-	if got := envOr(key, "fallback"); got != "value" {
+	if got := warp.EnvOr(key, "fallback"); got != "value" {
 		t.Fatalf("set = %q", got)
 	}
 	t.Setenv(key, "") // an empty value counts as unset
-	if got := envOr(key, "fallback"); got != "fallback" {
+	if got := warp.EnvOr(key, "fallback"); got != "fallback" {
 		t.Fatalf("empty = %q, want the default", got)
 	}
 }
@@ -30,7 +32,8 @@ func TestGatewayVersionIsSemver(t *testing.T) {
 	if _, err := semver.NewVersion(gatewayVersion); err != nil {
 		t.Fatalf("gatewayVersion %q: %v", gatewayVersion, err)
 	}
-	if want := "warpnet-gateway/" + gatewayVersion; userAgent != want {
-		t.Fatalf("userAgent = %q, want %q", userAgent, want)
+	fediverse.SetVersion(gatewayVersion)
+	if want := "warpnet-gateway/" + gatewayVersion; fediverse.UserAgent() != want {
+		t.Fatalf("userAgent = %q, want %q", fediverse.UserAgent(), want)
 	}
 }

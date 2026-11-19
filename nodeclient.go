@@ -38,18 +38,24 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
+
 	camouflage "github.com/Warp-net/libp2p-camouflage-transport"
-	"github.com/Warp-net/warpnet/event"
 	"github.com/Warp-net/warpnet/security"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/libp2p/go-libp2p"
+
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+
 	p2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/core/protocol"
+
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
+
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 )
 
@@ -108,7 +114,7 @@ type nodeClient struct {
 	owner *expirable.LRU[string, peer.ID] // userID -> its home node (domain.User.NodeId); user-scoped routes target it
 
 	throttled *expirable.LRU[string, struct{}]
-	users     *expirable.LRU[string, warpnetUser]
+	users     *expirable.LRU[string, fediverse.WarpnetUser]
 
 	// stream sends one attempt to a single member; defaults to streamToMember and
 	// is overridable in tests to exercise the hedging/timeout logic without a host.
@@ -121,7 +127,7 @@ func networkEntries(network string) ([]peer.AddrInfo, error) {
 	for _, s := range bootstrapByNetwork[network] {
 		ai, err := peer.AddrInfoFromString(s)
 		if err != nil {
-			netLog(network).Warnf("nodeclient: bad bootstrap %q: %v", s, err)
+			warp.NetLog(network).Warnf("nodeclient: bad bootstrap %q: %v", s, err)
 			continue
 		}
 		entries = append(entries, *ai)
@@ -219,7 +225,7 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	for _, e := range entries {
 		relays[e.ID] = struct{}{}
 		if cerr := h.Connect(ctx, e); cerr != nil {
-			netLog(network).Warnf("nodeclient: connect %s: %v", e.ID, cerr)
+			warp.NetLog(network).Warnf("nodeclient: connect %s: %v", e.ID, cerr)
 			continue
 		}
 		connected++
@@ -231,31 +237,31 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	}
 
 	if berr := kdht.Bootstrap(ctx); berr != nil {
-		netLog(network).Warnf("nodeclient: dht bootstrap: %v", berr)
+		warp.NetLog(network).Warnf("nodeclient: dht bootstrap: %v", berr)
 	}
 	select {
 	case rerr := <-kdht.RefreshRoutingTable():
 		if rerr != nil {
-			netLog(network).Warnf("nodeclient: dht refresh after bootstrap: %v", rerr)
+			warp.NetLog(network).Warnf("nodeclient: dht refresh after bootstrap: %v", rerr)
 		}
 	case <-time.After(20 * time.Second):
 	case <-ctx.Done():
 	}
-	netLog(network).Infof("nodeclient %v: joined Warpnet via %d relay(s); discovering members via DHT", h.ID(), connected)
+	warp.NetLog(network).Infof("nodeclient %v: joined Warpnet via %d relay(s); discovering members via DHT", h.ID(), connected)
 
 	c := &nodeClient{
 		h: h, priv: priv, dht: kdht, network: network, relays: relays,
 		owner:     expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
 		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
-		users:     expirable.NewLRU[string, warpnetUser](userCacheSize, nil, userCacheTTL),
+		users:     expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c, nil
 }
 
-// request streams the route to the member nodes discovered via the DHT, trying
+// Request streams the route to the member nodes discovered via the DHT, trying
 // each until one answers (relays serve only discovery, so they are excluded).
-func (c *nodeClient) request(route string, payload any) ([]byte, error) {
+func (c *nodeClient) Request(route string, payload any) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
@@ -264,7 +270,7 @@ func (c *nodeClient) request(route string, payload any) ([]byte, error) {
 		select { // routing table not populated yet — refresh and retry
 		case rerr := <-c.dht.RefreshRoutingTable():
 			if rerr != nil {
-				netLog(c.network).Warnf("nodeclient: dht refresh for %s: %v", route, rerr)
+				warp.NetLog(c.network).Warnf("nodeclient: dht refresh for %s: %v", route, rerr)
 			}
 		case <-time.After(15 * time.Second):
 		case <-ctx.Done():
@@ -330,9 +336,9 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 			switch {
 			case r.err != nil:
 				lastErr = r.err
-			case isRateLimited(r.bt):
+			case warp.IsRateLimited(r.bt):
 				c.markThrottled(route, r.peer)
-				netLog(c.network).Infof("nodeclient: %s rate limited %s, trying another member", r.peer, route)
+				warp.NetLog(c.network).Infof("nodeclient: %s rate limited %s, trying another member", r.peer, route)
 				lastErr = errNodeRateLimited
 			default:
 				c.remember(r.peer)
@@ -350,16 +356,6 @@ func (c *nodeClient) tryMembers(ctx context.Context, peers []peer.ID, route stri
 	return nil, fmt.Errorf("nodeclient: %s: %s failed on all member nodes: %w", c.network, route, lastErr)
 }
 
-func isRateLimited(bt []byte) bool {
-	var resp struct {
-		Code int `json:"code"`
-	}
-	if json.Unmarshal(bt, &resp) != nil {
-		return false
-	}
-	return resp.Code == event.RateLimitErrorCode
-}
-
 func isReadRoute(route string) bool {
 	return strings.Contains(route, "/get/")
 }
@@ -375,30 +371,30 @@ func (c *nodeClient) isThrottled(route string, p peer.ID) bool {
 	return c.throttled != nil && c.throttled.Contains(route+"|"+p.String())
 }
 
-// requestUser streams a user-scoped route directly to the node that OWNS userID
+// RequestUser streams a user-scoped route directly to the node that OWNS userID
 // (its domain.User.NodeId). Routes like POST_FOLLOW and GET_FOLLOWERS are
 // authoritative only on the owner node: a random member node silently "accepts"
 // a follow without persisting it and reads back an empty follower list, which
 // made federation depend on which node the DHT happened to answer with. Falls
 // back to the broadcast request when the owner can't be resolved or reached.
-func (c *nodeClient) requestUser(userID, route string, payload any) ([]byte, error) {
+func (c *nodeClient) RequestUser(userID, route string, payload any) ([]byte, error) {
 	if owner, ok := c.ownerNode(userID); ok && !c.isThrottled(route, owner) {
 		ctx, cancel := context.WithTimeout(context.Background(), perPeerTimeout)
 		bt, err := c.stream(ctx, owner, route, payload)
 		cancel()
 		switch {
-		case err == nil && !isRateLimited(bt):
+		case err == nil && !warp.IsRateLimited(bt):
 			c.remember(owner)
 			return bt, nil
 		case err == nil:
 			c.markThrottled(route, owner)
-			netLog(c.network).Infof("nodeclient: %s rate limited %s on owner of %s, falling back to broadcast", owner, route, userID)
+			warp.NetLog(c.network).Infof("nodeclient: %s rate limited %s on owner of %s, falling back to broadcast", owner, route, userID)
 		default:
-			netLog(c.network).Warnf("nodeclient: %s on owner of %s failed, falling back to broadcast: %v", route, userID, err)
+			warp.NetLog(c.network).Warnf("nodeclient: %s on owner of %s failed, falling back to broadcast: %v", route, userID, err)
 			c.forgetOwner(userID)
 		}
 	}
-	return c.request(route, payload)
+	return c.Request(route, payload)
 }
 
 // ownerNode resolves userID's home node from domain.User.NodeId (via GET_USER,
@@ -410,21 +406,21 @@ func (c *nodeClient) ownerNode(userID string) (peer.ID, bool) {
 		return p, true
 	}
 
-	bt, err := c.request(routeGetUser, getUserEvent{UserId: userID})
+	bt, err := c.Request(warp.RouteGetUser, warp.GetUserEvent{UserId: userID})
 	if err != nil {
 		return "", false
 	}
-	var u user
+	var u warp.User
 	if json.Unmarshal(bt, &u) != nil || u.NodeId == "" {
 		return "", false
 	}
 	p, err := peer.Decode(u.NodeId)
 	if err != nil {
-		netLog(c.network).Warnf("nodeclient: bad node_id %q for %s: %v", u.NodeId, userID, err)
+		warp.NetLog(c.network).Warnf("nodeclient: bad node_id %q for %s: %v", u.NodeId, userID, err)
 		return "", false
 	}
 	c.owner.Add(userID, p)
-	netLog(c.network).Infof("nodeclient: owner of %s resolved to node %s; user-scoped routes target it directly", userID, p)
+	warp.NetLog(c.network).Infof("nodeclient: owner of %s resolved to node %s; user-scoped routes target it directly", userID, p)
 	return p, true
 }
 
@@ -453,7 +449,7 @@ type nodeSource struct {
 	client *nodeClient
 }
 
-func (s nodeSource) GetUser(preferredUsername string) (warpnetUser, bool) {
+func (s nodeSource) GetUser(preferredUsername string) (fediverse.WarpnetUser, bool) {
 	return s.client.lookupUser(preferredUsername)
 }
 
@@ -461,22 +457,22 @@ func (s nodeSource) GetUser(preferredUsername string) (warpnetUser, bool) {
 // not error: the gateway asks every joined network for a handle (which carries
 // no network of its own), so a miss on the others is the normal case — the
 // caller reports it once when no network has the user.
-func (c *nodeClient) lookupUser(preferredUsername string) (warpnetUser, bool) {
+func (c *nodeClient) lookupUser(preferredUsername string) (fediverse.WarpnetUser, bool) {
 	if c.users != nil {
 		if u, ok := c.users.Get(preferredUsername); ok {
 			return u, true
 		}
 	}
-	bt, err := c.request(routeGetUser, getUserEvent{UserId: preferredUsername})
+	bt, err := c.Request(warp.RouteGetUser, warp.GetUserEvent{UserId: preferredUsername})
 	if err != nil {
-		netLog(c.network).Debugf("nodesource: get user %s: %v", preferredUsername, err)
-		return warpnetUser{}, false
+		warp.NetLog(c.network).Debugf("nodesource: get user %s: %v", preferredUsername, err)
+		return fediverse.WarpnetUser{}, false
 	}
-	var u user
+	var u warp.User
 	if uerr := json.Unmarshal(bt, &u); uerr != nil || u.Id == "" {
-		return warpnetUser{}, false
+		return fediverse.WarpnetUser{}, false
 	}
-	wu := warpnetUser{
+	wu := fediverse.WarpnetUser{
 		ID:                u.Id,
 		PreferredUsername: u.Id,
 		DisplayName:       u.Username,

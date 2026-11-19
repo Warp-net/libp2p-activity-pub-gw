@@ -63,13 +63,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Warp-net/warpnet/retrier"
-	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/logring"
+	"github.com/Warp-net/activity-pub-gw/internal/netguard"
+	"github.com/Warp-net/activity-pub-gw/internal/nostr"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
+
 	log "github.com/sirupsen/logrus"
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.115"
+const gatewayVersion = "0.1.116"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -81,11 +85,12 @@ func main() {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.InfoLevel)
 	// Mirror logs into an in-memory ring so the /logs endpoint can serve them.
-	logs := newLogRing(logRingSize)
+	logs := logring.NewRing(logRingSize)
 	log.AddHook(logs)
 	log.Infof("gateway: starting version %s", gatewayVersion)
+	fediverse.SetVersion(gatewayVersion)
 
-	keyPath := envOr("GATEWAY_KEY", "fediverse-gateway-key.pem")
+	keyPath := warp.EnvOr("GATEWAY_KEY", "fediverse-gateway-key.pem")
 
 	// Self-host the public endpoint via embedded Tailscale Funnel: the gateway
 	// becomes its own tailnet node and ListenFunnel (below) serves public HTTPS
@@ -93,8 +98,8 @@ func main() {
 	// persisted Dir keeps the hostname stable across restarts (a rotating name
 	// orphans existing followers).
 	ts := &tsnet.Server{
-		Hostname: envOr("GATEWAY_FUNNEL_HOSTNAME", "warpnet-gw"),
-		Dir:      envOr("GATEWAY_FUNNEL_DIR", "fediverse-gateway-tsnet"),
+		Hostname: warp.EnvOr("GATEWAY_FUNNEL_HOSTNAME", "warpnet-gw"),
+		Dir:      warp.EnvOr("GATEWAY_FUNNEL_DIR", "fediverse-gateway-tsnet"),
 		AuthKey:  os.Getenv("TS_AUTHKEY"),
 		UserLogf: log.Infof,
 		Logf:     log.Debugf,
@@ -109,24 +114,17 @@ func main() {
 	host := strings.TrimSuffix(st.Self.DNSName, ".")
 	log.Infof("gateway: tailscale funnel node up as %s", host)
 
-	key, err := loadOrCreateKey(keyPath)
-	if err != nil {
-		log.Fatalf(fatalFmt, err)
-	}
-	pubPEM, err := publicKeyPEM(key)
+	key, err := fediverse.LoadOrCreateKey(keyPath)
 	if err != nil {
 		log.Fatalf(fatalFmt, err)
 	}
 
-	// Join Warpnet through the network's bootstrap nodes (agnostic to any
-	// specific node) and serve any user via the network. Outbound federation is
-	// driven by the follower graph (onFollowed), never pinned to a user.
 	appCtx, appCancel := context.WithCancel(context.Background())
 
 	// Join every network in NODE_NETWORK at once — one libp2p node each — and
 	// serve them behind the single ActivityPub host. A handle carries no network,
 	// so multiNode locates each user on the network that has them.
-	var src warpnetSource = staticSource{} // empty fallback when no network is reachable
+	var src fediverse.WarpnetSource = fediverse.StaticSource{} // empty fallback when no network is reachable
 	var nodes *multiNode
 	clients := connectNetworks(appCtx)
 	if len(clients) == 0 {
@@ -137,62 +135,43 @@ func main() {
 		log.Infof("gateway: joined Warpnet (%s); any user is resolvable via the network", nodes.networks())
 	}
 
-	// The follower graph lives in Warpnet, read/written through the owner member
-	// node via the node connector (owner-targeted routes). Only when no node is
-	// configured does the gateway fall back to an in-memory dev store.
-	var followers followerStore
-	var req nodeRequester
+	var req warp.Requester
 	if nodes != nil {
 		req = nodes
-	} else {
-		followers = newMemFollowerStore()
+	}
+	g, err := fediverse.New(fediverse.Config{
+		Host:          host,
+		Key:           key,
+		Source:        src,
+		Requester:     req,
+		Logs:          logs,
+		LogsToken:     os.Getenv("GATEWAY_LOGS_TOKEN"),
+		ForeignHandle: nostr.IsHandle,
+	})
+	if err != nil {
+		log.Fatalf(fatalFmt, err)
 	}
 
-	g := &gateway{
-		host:      host,
-		key:       key,
-		keyPubPEM: pubPEM,
-		source:    src,
-		client:    newSafeClient(15 * time.Second),
-		sem:       make(chan struct{}, maxInflightDeliveries),
-		followers: followers,
-		req:       req,
-		// Retry transient Mastodon HTTP failures (network errors, 429, 5xx) a few
-		// times with exponential backoff; bounded so it stays within the request budget.
-		retrier:   retrier.New(300*time.Millisecond, 3, retrier.ExponentialBackoff),
-		getCache:  expirable.NewLRU[string, cachedGet](getCacheSize, nil, getCacheTTL),
-		actorIDs:  expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL),
-		handles:   expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL),
-		logs:      logs,
-		logsToken: os.Getenv("GATEWAY_LOGS_TOKEN"),
-	}
-	if nodes != nil {
-		// The store resolves stored follower handles back to actor urls through the
-		// gateway, so it is wired once g exists. Its routes are user-scoped, so
-		// multiNode sends each to the network that user lives on.
-		g.followers = nodeFollowerStore{req: nodes, resolver: g}
-	}
-
-	// Nostr accounts are read from public relays; GATEWAY_DISABLE_NOSTR turns
-	// the bridge off.
+	var hub *nostrHub
 	if os.Getenv("GATEWAY_DISABLE_NOSTR") == "" {
-		g.nostrRelays = newRelayPool(newSafeClient(0))
-		keys, kerr := nostrKeysFromEnv()
+		hub = &nostrHub{g: g, relays: nostr.NewRelayPool(netguard.NewClient(0))}
+		keys, kerr := nostr.KeysFromEnv(defaultGatewaySeed)
 		if kerr != nil {
 			log.Warnf("gateway: %v; Nostr keys are off", kerr)
 		}
-		g.nostrKeys = keys
+		hub.keys = keys
 		// Writing to Nostr waits for the node-facing sender check; until it is
 		// in, GATEWAY_NOSTR_PUBLISH stays off.
-		g.nostrPublish = keys != nil && os.Getenv("GATEWAY_NOSTR_PUBLISH") == "true"
-		log.Infof("gateway: Nostr keys %v, publishing to Nostr %v", keys != nil, g.nostrPublish)
-		nb := newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), "", host)
-		g.nostrLive = newNostrLive(nb, g.pushTimeline)
-		nb.trusted = g.nostrLive.trusted
-		go g.nostrLive.run(appCtx)
+		hub.publish = keys != nil && os.Getenv("GATEWAY_NOSTR_PUBLISH") == "true"
+		log.Infof("gateway: Nostr keys %v, publishing to Nostr %v", keys != nil, hub.publish)
+		nb := nostr.NewBridge(hub.relays, nostr.RelaysFromEnv(), "", host)
+		hub.live = nostr.NewLive(nb, hub.push)
+		nb.Trusted = hub.live.Trusted
+		g.Handle("/.well-known/nostr.json", nostr.NewNIP05Handler(hub.publishers))
+		go hub.live.Run(appCtx)
 		if nodes != nil {
 			for _, c := range clients {
-				go g.nostrLive.runScanner(appCtx, c, defaultOwnerHandle)
+				go hub.live.RunScanner(appCtx, c, warp.DefaultOwnerHandle)
 			}
 		}
 	}
@@ -204,12 +183,12 @@ func main() {
 	// ActivityPub. The Fediverse side is network-independent, so all nodes serve
 	// the same handlers.
 	for _, c := range clients {
-		c.serveRoutes(g, defaultOwnerHandle)
+		c.serveRoutes(g, hub, warp.DefaultOwnerHandle)
 	}
-	for _, pub := range g.nostrPublishers() {
+	for _, pub := range hub.publishers() {
 		for _, c := range clients {
-			if c.network == pub.network {
-				go newNostrOutbound(appCtx, c, pub).runScanner(defaultOwnerHandle)
+			if c.network == pub.Network {
+				go nostr.NewOutbound(appCtx, c, pub).RunScanner(warp.DefaultOwnerHandle)
 			}
 		}
 	}
@@ -224,31 +203,31 @@ func main() {
 	// One federation per network: the scan pages through the users of the network
 	// it runs on, and a user's pollers must read from their own network.
 	if nodes != nil {
-		feds := make(map[*nodeClient]*outboundFederation, len(clients))
+		feds := make(map[*nodeClient]*fediverse.OutboundFederation, len(clients))
 		for _, c := range clients {
-			of := newOutboundFederation(appCtx, c, g)
+			of := fediverse.NewOutboundFederation(appCtx, c, g)
 			feds[c] = of
-			go of.runScanner(defaultOwnerHandle)
+			go of.RunScanner(warp.DefaultOwnerHandle)
 		}
-		g.onFollowed = func(localUser string) {
+		g.OnFollowed = func(localUser string) {
 			c, ok := nodes.locate(localUser)
 			if !ok {
 				log.Warnf("gateway: cannot federate %s: no joined network serves it", localUser)
 				return
 			}
-			feds[c].start(localUser)
+			feds[c].Start(localUser)
 		}
 	}
 
 	srv := &http.Server{
-		Handler:           g.routes(),
+		Handler:           g.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	// Keep the global rate limiter's sliding window advancing: without this it
 	// stays locked forever once the budget is first exceeded (the middleware
 	// fast-429s a locked limiter without ever calling Limit, which is what
 	// reclaims expired weight), taking the whole data plane down until restart.
-	go g.limits.drain(appCtx)
+	go g.Limits.Drain(appCtx)
 
 	go func() {
 		log.Infof("gateway: serving Warpnet users at https://%s/users/{id}", host)
@@ -268,7 +247,7 @@ func main() {
 	// GATEWAY_LOGS_TOKEN.
 	var logsSrv *http.Server
 	if addr := os.Getenv("GATEWAY_LOGS_ADDR"); addr != "" {
-		logsSrv = &http.Server{Addr: addr, Handler: g.logsHandler(), ReadHeaderTimeout: 10 * time.Second}
+		logsSrv = &http.Server{Addr: addr, Handler: g.LogsHandler(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			log.Infof("gateway: serving /logs and /debug/pprof on %s", addr)
 			if err := logsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -293,11 +272,4 @@ func main() {
 		_ = logsSrv.Shutdown(ctx)
 	}
 	_ = ts.Close()
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

@@ -27,22 +27,25 @@ resulting from the use or misuse of this software.
 
 package main
 
-// nodeserver is the libp2p transport for the Mastodon -> Warpnet direction: it
-// answers Warpnet's public /public routes. To a Warpnet node the gateway is an
-// ordinary member peer — it reports node info with a hardcoded Mastodon owner
-// and resolves every request through the mastodonBridge. It verifies the
-// caller's signature (like the node's auth middleware) but holds no domain
-// logic itself, and does NOT register the spoof-challenge route (it is not a
-// Warpnet-codebase node; discovery tolerates that).
-
 import (
 	"context"
 	"io"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
 	"github.com/Warp-net/warpnet/core/warpnet"
 	"github.com/Warp-net/warpnet/event"
+
+	// nodeserver is the libp2p transport for the Mastodon -> Warpnet direction: it
+	// answers Warpnet's public /public routes. To a Warpnet node the gateway is an
+	// ordinary member peer — it reports node info with a hardcoded Mastodon owner
+	// and resolves every request through the mastodonBridge. It verifies the
+	// caller's signature (like the node's auth middleware) but holds no domain
+	// logic itself, and does NOT register the spoof-challenge route (it is not a
+	// Warpnet-codebase node; discovery tolerates that).
+
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -63,67 +66,67 @@ type routeHandler func(ctx context.Context, body []byte) (any, error)
 // serveRoutes registers the gateway as a libp2p server for Warpnet's public
 // routes, delegating all domain work to the bridge. ownerHandle is the Mastodon
 // account advertised as the node owner.
-func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
-	b := newMastodonBridge(g, c.h.ID().String())
-	nb := g.newNostrBridge(c)
+func (c *nodeClient) serveRoutes(g *fediverse.Gateway, hub *nostrHub, ownerHandle string) {
+	b := fediverse.NewMastodonBridge(g, c.h.ID().String())
+	nb := hub.bridgeFor(c)
 
 	handlers := map[string]routeHandler{
 		event.PUBLIC_GET_INFO: c.infoHandler(ownerHandle),
-		event.PUBLIC_GET_WHOTOFOLLOW: wrapJSON(func(ctx context.Context, ev getAllUsersEvent) (any, error) {
+		event.PUBLIC_GET_WHOTOFOLLOW: wrapJSON(func(ctx context.Context, ev warp.GetAllUsersEvent) (any, error) {
 			return b.GetWhoToFollow(ctx, ev)
 		}),
 
-		routeGetUser: wrapJSON(func(ctx context.Context, ev getUserEvent) (any, error) {
-			if nb.serves(string(ev.UserId)) {
+		warp.RouteGetUser: wrapJSON(func(ctx context.Context, ev warp.GetUserEvent) (any, error) {
+			if nb.Serves(string(ev.UserId)) {
 				return nb.GetUser(ctx, string(ev.UserId))
 			}
 			return b.GetUser(ctx, string(ev.UserId))
 		}),
-		routeGetUsers: wrapJSON(func(ctx context.Context, ev getAllUsersEvent) (any, error) {
+		warp.RouteGetUsers: wrapJSON(func(ctx context.Context, ev warp.GetAllUsersEvent) (any, error) {
 			if string(ev.UserId) == ownerHandle {
 				return b.GetWhoToFollow(ctx, ev)
 			}
 			getBrief := b.GetUserBrief
-			if nb.serves(string(ev.UserId)) {
+			if nb.Serves(string(ev.UserId)) {
 				getBrief = nb.GetUserBrief
 			}
 			u, err := getBrief(ctx, string(ev.UserId)) // list context: skip count fetches
 			if err != nil {
 				return event.UsersResponse{}, nil //nolint:nilerr // unknown handle -> empty
 			}
-			return event.UsersResponse{Users: []user{u}}, nil
+			return event.UsersResponse{Users: []warp.User{u}}, nil
 		}),
-		routeGetTweets: wrapJSON(func(ctx context.Context, ev getAllTweetsEvent) (any, error) {
-			if nb.serves(ev.UserId) || nb.serves(ev.RootId) || nb.serves(ev.ParentId) {
+		warp.RouteGetTweets: wrapJSON(func(ctx context.Context, ev warp.GetAllTweetsEvent) (any, error) {
+			if nb.Serves(ev.UserId) || nb.Serves(ev.RootId) || nb.Serves(ev.ParentId) {
 				return nb.GetTweetsOrReplies(ctx, ev)
 			}
 			return b.GetTweetsOrReplies(ctx, ev)
 		}),
-		routeGetTweet: wrapJSON(func(ctx context.Context, ev getTweetEvent) (any, error) {
-			if nb.serves(string(ev.TweetId)) {
+		warp.RouteGetTweet: wrapJSON(func(ctx context.Context, ev warp.GetTweetEvent) (any, error) {
+			if nb.Serves(string(ev.TweetId)) {
 				return nb.GetTweet(ctx, string(ev.TweetId))
 			}
 			return b.GetTweet(ctx, string(ev.TweetId))
 		}),
-		event.PUBLIC_GET_TWEET_STATS: wrapJSON(func(ctx context.Context, ev getTweetEvent) (any, error) {
-			if nb.serves(string(ev.TweetId)) {
+		event.PUBLIC_GET_TWEET_STATS: wrapJSON(func(ctx context.Context, ev warp.GetTweetEvent) (any, error) {
+			if nb.Serves(string(ev.TweetId)) {
 				return nb.GetTweetStats(ctx, string(ev.TweetId))
 			}
 			return b.GetTweetStats(ctx, string(ev.TweetId))
 		}),
-		routeGetFollowers: wrapJSON(func(ctx context.Context, ev getFollowersEvent) (any, error) {
-			if nb.serves(ev.UserId) {
+		warp.RouteGetFollowers: wrapJSON(func(ctx context.Context, ev warp.GetFollowersEvent) (any, error) {
+			if nb.Serves(ev.UserId) {
 				return nb.GetFollowers(ctx, ev.UserId, ev.Cursor)
 			}
 			return b.GetFollowers(ctx, string(ev.UserId), ev.Cursor)
 		}),
-		routeGetFollowings: wrapJSON(func(ctx context.Context, ev getFollowersEvent) (any, error) {
-			if nb.serves(ev.UserId) {
+		warp.RouteGetFollowings: wrapJSON(func(ctx context.Context, ev warp.GetFollowersEvent) (any, error) {
+			if nb.Serves(ev.UserId) {
 				return nb.GetFollowings(ctx, ev.UserId, ev.Cursor)
 			}
 			return b.GetFollowings(ctx, string(ev.UserId), ev.Cursor)
 		}),
-		routeGetImage: wrapJSON(func(ctx context.Context, ev getImageEvent) (any, error) {
+		warp.RouteGetImage: wrapJSON(func(ctx context.Context, ev warp.GetImageEvent) (any, error) {
 			return b.GetImage(ctx, ev.Key)
 		}),
 		event.PUBLIC_POST_VIEW: func(context.Context, []byte) (any, error) {
@@ -138,13 +141,13 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		// The emoji is normalized here, at the wire boundary: the node forwards
 		// whatever the client sent, and a client that predates reactions sends
 		// none — which means the default heart, i.e. a favourite.
-		routePostReact: wrapJSON(func(ctx context.Context, ev reactionEvent) (any, error) {
-			emoji, err := normalizeReaction(ev.Emoji)
+		warp.RoutePostReact: wrapJSON(func(ctx context.Context, ev warp.ReactionEvent) (any, error) {
+			emoji, err := warp.NormalizeReaction(ev.Emoji)
 			if err != nil {
 				return nil, err
 			}
-			if nb.serves(string(ev.TweetId)) {
-				go nb.pub.React(string(ev.OwnerId), string(ev.TweetId), emoji, false)
+			if nb.Serves(string(ev.TweetId)) {
+				go nb.Pub.React(string(ev.OwnerId), string(ev.TweetId), emoji, false)
 				return reactionsCount(emoji, 0), nil
 			}
 			count, rerr := b.React(ctx, string(ev.OwnerId), string(ev.TweetId), emoji, false)
@@ -152,48 +155,48 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		}),
 		// An unreact drops whichever reaction the user had, so it names no emoji
 		// and always federates as an Undo(Like).
-		routePostUnreact: wrapJSON(func(ctx context.Context, ev reactionEvent) (any, error) {
-			if nb.serves(string(ev.TweetId)) {
-				go nb.pub.React(string(ev.OwnerId), string(ev.TweetId), "", true)
+		warp.RoutePostUnreact: wrapJSON(func(ctx context.Context, ev warp.ReactionEvent) (any, error) {
+			if nb.Serves(string(ev.TweetId)) {
+				go nb.Pub.React(string(ev.OwnerId), string(ev.TweetId), "", true)
 				return reactionsCount("", 0), nil
 			}
 			count, err := b.React(ctx, string(ev.OwnerId), string(ev.TweetId), "", true)
 			return reactionsCount("", count), err
 		}),
-		routePostFollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
-			if nb.serves(string(ev.FollowingId)) {
-				g.nostrLive.setFollow(string(ev.FollowerId), string(ev.FollowingId), false)
-				go nb.pub.Follow(string(ev.FollowerId), string(ev.FollowingId), false)
+		warp.RoutePostFollow: wrapJSON(func(ctx context.Context, ev warp.NewFollowEvent) (any, error) {
+			if nb.Serves(string(ev.FollowingId)) {
+				hub.setFollow(string(ev.FollowerId), string(ev.FollowingId), false)
+				go nb.Pub.Follow(string(ev.FollowerId), string(ev.FollowingId), false)
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), false)
 		}),
-		routePostUnfollow: wrapJSON(func(ctx context.Context, ev newFollowEvent) (any, error) {
-			if nb.serves(string(ev.FollowingId)) {
-				g.nostrLive.setFollow(string(ev.FollowerId), string(ev.FollowingId), true)
-				go nb.pub.Follow(string(ev.FollowerId), string(ev.FollowingId), true)
+		warp.RoutePostUnfollow: wrapJSON(func(ctx context.Context, ev warp.NewFollowEvent) (any, error) {
+			if nb.Serves(string(ev.FollowingId)) {
+				hub.setFollow(string(ev.FollowerId), string(ev.FollowingId), true)
+				go nb.Pub.Follow(string(ev.FollowerId), string(ev.FollowingId), true)
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Follow(ctx, string(ev.FollowerId), string(ev.FollowingId), true)
 		}),
-		routePostTweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
+		warp.RoutePostTweet: wrapJSON(func(ctx context.Context, ev warp.Tweet) (any, error) {
 			if !ev.IsReply() {
-				if publishableTweet(ev, ev.UserId) {
-					g.federateTweetAsync(ev)
+				if warp.PublishableTweet(ev, ev.UserId) {
+					g.FederateTweetAsync(ev)
 				}
 				return ev, nil
 			}
 			// Echo the reply back as the tweet the node stored, so the Warpnet
 			// UI renders it.
-			if nb.isReplyTo(ev) {
-				go nb.pub.Reply(ev)
+			if nb.IsReplyTo(ev) {
+				go nb.Pub.Reply(ev)
 				return ev, nil
 			}
 			return ev, b.Reply(ctx, ev)
 		}),
-		routePostReply: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
-			if nb.isReplyTo(ev) {
-				go nb.pub.Reply(ev)
+		warp.RoutePostReply: wrapJSON(func(ctx context.Context, ev warp.Tweet) (any, error) {
+			if nb.IsReplyTo(ev) {
+				go nb.Pub.Reply(ev)
 				return ev, nil
 			}
 			return ev, b.Reply(ctx, ev)
@@ -202,18 +205,18 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 		// followers' node. Replies live in their thread, not the timeline, so
 		// only a top-level post federates; everything is acknowledged so the
 		// sender doesn't retry.
-		routePostTimeline: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
-			if !ev.IsReply() && publishableTweet(ev, ev.UserId) {
-				g.federateTweetAsync(ev)
+		warp.RoutePostTimeline: wrapJSON(func(ctx context.Context, ev warp.Tweet) (any, error) {
+			if !ev.IsReply() && warp.PublishableTweet(ev, ev.UserId) {
+				g.FederateTweetAsync(ev)
 			}
 			return ev, nil
 		}),
 		// Warpnet forwards a reply deletion to the parent author's node over the
 		// private delete route; federate it as an AP Delete. Only a reply (a
 		// parent set) targets a Mastodon note; anything else is acknowledged.
-		routeDeleteTweet: wrapJSON(func(ctx context.Context, ev deleteTweetEvent) (any, error) {
-			if nb.serves(ev.ParentId) || nb.serves(ev.RootId) {
-				go nb.pub.DeleteReply(ev)
+		warp.RouteDeleteTweet: wrapJSON(func(ctx context.Context, ev warp.DeleteTweetEvent) (any, error) {
+			if nb.Serves(ev.ParentId) || nb.Serves(ev.RootId) {
+				go nb.Pub.DeleteReply(ev)
 				return struct{}{}, nil
 			}
 			if ev.ParentId == "" && ev.RootId == "" {
@@ -221,20 +224,20 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 			}
 			return struct{}{}, b.Delete(ctx, ev)
 		}),
-		routePostRetweet: wrapJSON(func(ctx context.Context, ev tweet) (any, error) {
-			if ev.QuotedTweetId != nil && nb.serves(*ev.QuotedTweetId) {
-				go nb.pub.Quote(ev)
+		warp.RoutePostRetweet: wrapJSON(func(ctx context.Context, ev warp.Tweet) (any, error) {
+			if ev.QuotedTweetId != nil && nb.Serves(*ev.QuotedTweetId) {
+				go nb.Pub.Quote(ev)
 				return ev, nil
 			}
-			if nb.serves(retweetObject(ev)) {
-				go nb.pub.Repost(retweeterOf(ev), retweetObject(ev), false)
+			if nb.Serves(retweetObject(ev)) {
+				go nb.Pub.Repost(retweeterOf(ev), retweetObject(ev), false)
 				return ev, nil
 			}
 			return ev, b.Announce(ctx, retweeterOf(ev), retweetObject(ev), false)
 		}),
-		routePostUnretweet: wrapJSON(func(ctx context.Context, ev unretweetEvent) (any, error) {
-			if nb.serves(string(ev.TweetId)) {
-				go nb.pub.Repost(string(ev.RetweeterId), string(ev.TweetId), true)
+		warp.RoutePostUnretweet: wrapJSON(func(ctx context.Context, ev warp.UnretweetEvent) (any, error) {
+			if nb.Serves(string(ev.TweetId)) {
+				go nb.Pub.Repost(string(ev.RetweeterId), string(ev.TweetId), true)
 				return struct{}{}, nil
 			}
 			return struct{}{}, b.Announce(ctx, string(ev.RetweeterId), string(ev.TweetId), true)
@@ -244,7 +247,7 @@ func (c *nodeClient) serveRoutes(g *gateway, ownerHandle string) {
 	for route, h := range handlers {
 		c.h.SetStreamHandler(protocol.ID(route), c.streamHandler(route, h))
 	}
-	netLog(c.network).Infof("nodeserver: serving %d public routes as %s (owner %s)", len(handlers), c.h.ID(), ownerHandle)
+	warp.NetLog(c.network).Infof("nodeserver: serving %d public routes as %s (owner %s)", len(handlers), c.h.ID(), ownerHandle)
 }
 
 // streamHandler reads the signed request envelope, verifies it against the
@@ -256,24 +259,24 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 
 		data, err := io.ReadAll(io.LimitReader(s, maxRequestBytes))
 		if err != nil {
-			netLog(c.network).Warnf("nodeserver: %s: read: %v", route, err)
+			warp.NetLog(c.network).Warnf("nodeserver: %s: read: %v", route, err)
 			return
 		}
-		var msg message
+		var msg warp.Message
 		if uerr := wjson.Unmarshal(data, &msg); uerr != nil {
-			netLog(c.network).Warnf("nodeserver: %s: bad envelope: %v", route, uerr)
+			warp.NetLog(c.network).Warnf("nodeserver: %s: bad envelope: %v", route, uerr)
 			return
 		}
 		// Signature is mandatory, like the node's auth middleware: an unsigned
 		// envelope must not bypass verification.
 		if msg.Signature == "" {
-			netLog(c.network).Warnf("nodeserver: %s: signature missing", route)
+			warp.NetLog(c.network).Warnf("nodeserver: %s: signature missing", route)
 			return
 		}
 		if conn := s.Conn(); conn != nil {
 			pub := warpnet.FromIDToPubKey(conn.RemotePeer())
 			if verr := security.VerifySignature(pub, msg.SigningBytes(), msg.Signature); verr != nil {
-				netLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
+				warp.NetLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
 				return
 			}
 		}
@@ -283,21 +286,21 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 		// Trace the whole pipeline: every outbound REST/AP fetch this libp2p
 		// request fans out to is logged indented under one id, then the summary
 		// line below reports the fetch count and total wall-clock.
-		ctx, tr := startTrace(ctx)
+		ctx, tr := warp.StartTrace(ctx)
 		start := time.Now()
 		resp, herr := h(ctx, msg.Body)
-		netLog(c.network).Infof("[%s] libp2p %s: %d REST calls in %s", tr.id, route, tr.calls.Load(), time.Since(start).Round(time.Millisecond))
+		warp.NetLog(c.network).Infof("[%s] libp2p %s: %d REST calls in %s", tr.ID, route, tr.Calls.Load(), time.Since(start).Round(time.Millisecond))
 		if herr != nil {
-			netLog(c.network).Warnf("nodeserver: %s: %v", route, herr)
+			warp.NetLog(c.network).Warnf("nodeserver: %s: %v", route, herr)
 			resp = event.ResponseError{Message: herr.Error()}
 		}
 		out, merr := wjson.Marshal(resp)
 		if merr != nil {
-			netLog(c.network).Errorf("nodeserver: %s: marshal response: %v", route, merr)
+			warp.NetLog(c.network).Errorf("nodeserver: %s: marshal response: %v", route, merr)
 			return
 		}
 		if _, werr := s.Write(out); werr != nil {
-			netLog(c.network).Warnf("nodeserver: %s: write: %v", route, werr)
+			warp.NetLog(c.network).Warnf("nodeserver: %s: write: %v", route, werr)
 		}
 	}
 }
@@ -352,14 +355,14 @@ func reactionsCount(emoji string, count uint64) event.ReactionsCountResponse {
 	return resp
 }
 
-func retweeterOf(ev tweet) string {
+func retweeterOf(ev warp.Tweet) string {
 	if ev.RetweetedBy != nil && *ev.RetweetedBy != "" {
 		return *ev.RetweetedBy
 	}
 	return ev.UserId
 }
 
-func retweetObject(ev tweet) string {
+func retweetObject(ev warp.Tweet) string {
 	if ev.Id != "" {
 		return ev.Id
 	}

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
+
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -16,8 +18,8 @@ import (
 
 // signingEnvelope frames a body/timestamp/route the way the wire does, so a
 // test can ask what bytes the signature covers.
-func signingEnvelope(body []byte, ts time.Time, route string) message {
-	return message{Body: wjson.RawMessage(body), Timestamp: ts, Destination: route}
+func signingEnvelope(body []byte, ts time.Time, route string) warp.Message {
+	return warp.Message{Body: wjson.RawMessage(body), Timestamp: ts, Destination: route}
 }
 
 // The gateway signs with warpnet's own Message.SigningBytes: the raw body,

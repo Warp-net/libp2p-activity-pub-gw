@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -44,14 +46,14 @@ func newStubNet(t *testing.T, network string, users ...string) *stubNet {
 		if fail != nil {
 			return nil, fail
 		}
-		if route == routeGetUser {
-			ev, _ := payload.(getUserEvent)
+		if route == warp.RouteGetUser {
+			ev, _ := payload.(warp.GetUserEvent)
 			if !s.users[string(ev.UserId)] {
 				return []byte(`{}`), nil // this network doesn't have the user
 			}
 			// No node_id: requestUser then falls back to an in-network
 			// broadcast, which is what the pre-multi-network code did too.
-			return json.Marshal(user{Id: string(ev.UserId), Username: string(ev.UserId)})
+			return json.Marshal(warp.User{Id: string(ev.UserId), Username: string(ev.UserId)})
 		}
 		return []byte(`{}`), nil
 	}
@@ -66,7 +68,7 @@ func (s *stubNet) routes() []string {
 	defer s.mu.Unlock()
 	out := make([]string, 0, len(s.calls))
 	for _, r := range s.calls {
-		if r != routeGetUser {
+		if r != warp.RouteGetUser {
 			out = append(out, r)
 		}
 	}
@@ -82,8 +84,8 @@ func (s *stubNet) reset() {
 func TestConfiguredNetworks(t *testing.T) {
 	t.Run("unset joins the default network alone", func(t *testing.T) {
 		t.Setenv("NODE_NETWORK", "")
-		if got := configuredNetworks(); len(got) != 1 || got[0] != defaultWarpnetNetwork {
-			t.Fatalf("networks = %v, want just %s", got, defaultWarpnetNetwork)
+		if got := configuredNetworks(); len(got) != 1 || got[0] != warp.DefaultNetwork {
+			t.Fatalf("networks = %v, want just %s", got, warp.DefaultNetwork)
 		}
 	})
 
@@ -182,13 +184,13 @@ func TestMultiNodeConfinesUserScopedCallsToTheHomeNetwork(t *testing.T) {
 	test := newStubNet(t, "testnet", "bob")
 	m := newMultiNode([]*nodeClient{main.client, test.client})
 
-	if _, err := m.requestUser("bob", routePostFollow, newFollowEvent{FollowingId: "bob"}); err != nil {
+	if _, err := m.RequestUser("bob", warp.RoutePostFollow, warp.NewFollowEvent{FollowingId: "bob"}); err != nil {
 		t.Fatalf("follow for bob: %v", err)
 	}
 	if got := main.routes(); len(got) != 0 {
 		t.Fatalf("warpnet served %v for a testnet user — the follow landed in the wrong network", got)
 	}
-	if got := test.routes(); len(got) != 1 || got[0] != routePostFollow {
+	if got := test.routes(); len(got) != 1 || got[0] != warp.RoutePostFollow {
 		t.Fatalf("testnet routes = %v, want the follow", got)
 	}
 
@@ -196,13 +198,13 @@ func TestMultiNodeConfinesUserScopedCallsToTheHomeNetwork(t *testing.T) {
 	test.reset()
 
 	// requestIn (inbound Fediverse writes) is confined the same way.
-	if _, err := m.requestIn("alice", routePostReact, reactionEvent{UserId: "alice"}); err != nil {
+	if _, err := m.RequestIn("alice", warp.RoutePostReact, warp.ReactionEvent{UserId: "alice"}); err != nil {
 		t.Fatalf("react for alice: %v", err)
 	}
 	if got := test.routes(); len(got) != 0 {
 		t.Fatalf("testnet served %v for a warpnet user", got)
 	}
-	if got := main.routes(); len(got) != 1 || got[0] != routePostReact {
+	if got := main.routes(); len(got) != 1 || got[0] != warp.RoutePostReact {
 		t.Fatalf("warpnet routes = %v, want the reaction", got)
 	}
 }
@@ -215,11 +217,11 @@ func TestMultiNodeRefusesAWriteForAnUnknownUser(t *testing.T) {
 
 	for name, call := range map[string]func() error{
 		"requestUser": func() error {
-			_, err := m.requestUser("nobody", routePostFollow, newFollowEvent{})
+			_, err := m.RequestUser("nobody", warp.RoutePostFollow, warp.NewFollowEvent{})
 			return err
 		},
 		"requestIn": func() error {
-			_, err := m.requestIn("nobody", routePostReact, reactionEvent{})
+			_, err := m.RequestIn("nobody", warp.RoutePostReact, warp.ReactionEvent{})
 			return err
 		},
 	} {
@@ -247,10 +249,10 @@ func TestMultiNodeWithOneNetworkSkipsLocation(t *testing.T) {
 	only := newStubNet(t, "warpnet") // knows no users at all
 	m := newMultiNode([]*nodeClient{only.client})
 
-	if _, err := m.requestUser("ghost", routePostFollow, newFollowEvent{}); err != nil {
+	if _, err := m.RequestUser("ghost", warp.RoutePostFollow, warp.NewFollowEvent{}); err != nil {
 		t.Fatalf("single-network requestUser: %v", err)
 	}
-	if got := only.routes(); len(got) != 1 || got[0] != routePostFollow {
+	if got := only.routes(); len(got) != 1 || got[0] != warp.RoutePostFollow {
 		t.Fatalf("routes = %v, want the follow served anyway", got)
 	}
 }
@@ -264,7 +266,7 @@ func TestMultiNodeRefusesARequestItCannotRoute(t *testing.T) {
 	test := newStubNet(t, "testnet", "bob")
 	m := newMultiNode([]*nodeClient{main.client, test.client})
 
-	_, err := m.request(routeGetTweet, getTweetEvent{TweetId: "t1"})
+	_, err := m.Request(warp.RouteGetTweet, warp.GetTweetEvent{TweetId: "t1"})
 	if !errors.Is(err, errNoRoutingUser) {
 		t.Fatalf("err = %v, want errNoRoutingUser", err)
 	}
@@ -273,13 +275,13 @@ func TestMultiNodeRefusesARequestItCannotRoute(t *testing.T) {
 	}
 
 	// Named, it is served — by that user's network only.
-	if _, err := m.requestIn("bob", routeGetTweet, getTweetEvent{TweetId: "t1"}); err != nil {
+	if _, err := m.RequestIn("bob", warp.RouteGetTweet, warp.GetTweetEvent{TweetId: "t1"}); err != nil {
 		t.Fatalf("routed read: %v", err)
 	}
 	if len(main.routes()) != 0 {
 		t.Fatalf("warpnet served %v for a testnet user", main.routes())
 	}
-	if got := test.routes(); len(got) != 1 || got[0] != routeGetTweet {
+	if got := test.routes(); len(got) != 1 || got[0] != warp.RouteGetTweet {
 		t.Fatalf("testnet routes = %v", got)
 	}
 }
@@ -290,26 +292,11 @@ func TestMultiNodeWithOneNetworkServesUnroutedRequests(t *testing.T) {
 	only := newStubNet(t, "warpnet")
 	m := newMultiNode([]*nodeClient{only.client})
 
-	if _, err := m.request(routeGetTweet, getTweetEvent{TweetId: "t1"}); err != nil {
+	if _, err := m.Request(warp.RouteGetTweet, warp.GetTweetEvent{TweetId: "t1"}); err != nil {
 		t.Fatalf("single-network read: %v", err)
 	}
-	if got := only.routes(); len(got) != 1 || got[0] != routeGetTweet {
+	if got := only.routes(); len(got) != 1 || got[0] != warp.RouteGetTweet {
 		t.Fatalf("routes = %v", got)
-	}
-}
-
-// A requester that spans no networks (the single-node client, or a test fake)
-// keeps the plain broadcast behaviour.
-func TestRequestForUserFallsBackToBroadcast(t *testing.T) {
-	g := testGateway(t)
-	fake := &fakeRequester{}
-	g.req = fake
-
-	if _, err := g.requestForUser("alice", routePostReact, reactionEvent{}); err != nil {
-		t.Fatalf("broadcast fallback: %v", err)
-	}
-	if fake.lastRoute != routePostReact {
-		t.Fatalf("route = %q, want the reaction broadcast", fake.lastRoute)
 	}
 }
 
@@ -322,10 +309,8 @@ func TestPublicSurfaceReadsStayOnTheOwnersNetwork(t *testing.T) {
 	test := newStubNet(t, "testnet", "bob")
 	m := newMultiNode([]*nodeClient{main.client, test.client})
 
-	g := testGateway(t)
-	g.req = m
-	g.source = m
-	srv := httptest.NewServer(g.routes())
+	g := newRouterTestGateway(t, fediverse.Config{Requester: m, Source: m})
+	srv := httptest.NewServer(g.Routes())
 	defer srv.Close()
 
 	cases := map[string]struct {
@@ -333,16 +318,16 @@ func TestPublicSurfaceReadsStayOnTheOwnersNetwork(t *testing.T) {
 		owner, intruder *stubNet
 	}{
 		"a mainnet user's status is not read from testnet": {
-			path: pathUsers + "alice" + pathStatuses + "t1", owner: main, intruder: test,
+			path: fediverse.PathUsers + "alice" + fediverse.PathStatuses + "t1", owner: main, intruder: test,
 		},
 		"a testnet user's status is not read from mainnet": {
-			path: pathUsers + "bob" + pathStatuses + "t2", owner: test, intruder: main,
+			path: fediverse.PathUsers + "bob" + fediverse.PathStatuses + "t2", owner: test, intruder: main,
 		},
 		"a mainnet user's media is not read from testnet": {
-			path: pathMedia + encodeMediaRef("alice", "avatar-key"), owner: main, intruder: test,
+			path: fediverse.PathMedia + fediverse.EncodeMediaRef("alice", "avatar-key"), owner: main, intruder: test,
 		},
 		"a testnet user's media is not read from mainnet": {
-			path: pathMedia + encodeMediaRef("bob", "avatar-key"), owner: test, intruder: main,
+			path: fediverse.PathMedia + fediverse.EncodeMediaRef("bob", "avatar-key"), owner: test, intruder: main,
 		},
 	}
 	for name, tc := range cases {

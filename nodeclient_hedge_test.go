@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -34,7 +35,7 @@ func TestTryMembersHedgesPastDeadPeer(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	bt, err := c.tryMembers(ctx, []peer.ID{dead, good}, routeGetUser, nil)
+	bt, err := c.tryMembers(ctx, []peer.ID{dead, good}, warp.RouteGetUser, nil)
 	elapsed := time.Since(start)
 
 	if err != nil {

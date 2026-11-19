@@ -13,14 +13,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
 	"github.com/Warp-net/warpnet/event"
 	"github.com/hashicorp/golang-lru/v2/expirable"
+
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 func TestNetworkEntries(t *testing.T) {
-	for _, network := range []string{defaultWarpnetNetwork, "testnet"} {
+	for _, network := range []string{warp.DefaultNetwork, "testnet"} {
 		entries, err := networkEntries(network)
 		if err != nil {
 			t.Fatalf("%s: %v", network, err)
@@ -76,7 +79,7 @@ func TestMemberCandidates(t *testing.T) {
 	member := peer.ID("member-1")
 	c.good = []peer.ID{member, member, relay, c.h.ID(), ""}
 
-	got := c.memberCandidates(routeGetUser)
+	got := c.memberCandidates(warp.RouteGetUser)
 	// Relays serve discovery only, our own id is not a data peer, and duplicates
 	// would just re-dial the same node.
 	if len(got) != 1 || got[0] != member {
@@ -89,7 +92,7 @@ func TestMemberCandidatesIsCapped(t *testing.T) {
 	for i := range maxMemberCandidates + 10 {
 		c.good = append(c.good, peer.ID("peer-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+string(rune('a'+i/26))))
 	}
-	if got := len(c.memberCandidates(routeGetUser)); got > maxMemberCandidates {
+	if got := len(c.memberCandidates(warp.RouteGetUser)); got > maxMemberCandidates {
 		t.Fatalf("candidates = %d, want at most %d", got, maxMemberCandidates)
 	}
 }
@@ -118,7 +121,7 @@ func TestRememberMovesTheAnsweringPeerToTheFront(t *testing.T) {
 
 func TestRequestWithoutDiscoveredMembers(t *testing.T) {
 	c := newTestNode(t, "no-members")
-	_, err := c.request(routeGetUser, getUserEvent{UserId: "alice"})
+	_, err := c.Request(warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"})
 	if err == nil || !strings.Contains(err.Error(), "no Warpnet member nodes discovered") {
 		t.Fatalf("err = %v", err)
 	}
@@ -145,8 +148,8 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 	member := peer.ID("member-1")
 
 	c, targets := stubbedClient(t, func(p peer.ID, route string, _ any) ([]byte, error) {
-		if route == routeGetUser {
-			return json.Marshal(user{Id: "alice", NodeId: owner.String()})
+		if route == warp.RouteGetUser {
+			return json.Marshal(warp.User{Id: "alice", NodeId: owner.String()})
 		}
 		return []byte(`{"ok":true}`), nil
 	})
@@ -154,7 +157,7 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 
 	// Routes like GET_FOLLOWERS are authoritative only on the owner node; a random
 	// member answers with an empty list.
-	if _, err := c.requestUser("alice", routeGetFollowers, getFollowersEvent{UserId: "alice"}); err != nil {
+	if _, err := c.RequestUser("alice", warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: "alice"}); err != nil {
 		t.Fatalf("requestUser: %v", err)
 	}
 	got := *targets
@@ -164,7 +167,7 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 
 	t.Run("the resolved owner is cached", func(t *testing.T) {
 		before := len(*targets)
-		if _, err := c.requestUser("alice", routeGetFollowers, getFollowersEvent{UserId: "alice"}); err != nil {
+		if _, err := c.RequestUser("alice", warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: "alice"}); err != nil {
 			t.Fatal(err)
 		}
 		if got := len(*targets) - before; got != 1 {
@@ -175,7 +178,7 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 	t.Run("forgetOwner forces a re-resolve", func(t *testing.T) {
 		c.forgetOwner("alice")
 		before := len(*targets)
-		if _, err := c.requestUser("alice", routeGetFollowers, getFollowersEvent{UserId: "alice"}); err != nil {
+		if _, err := c.RequestUser("alice", warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: "alice"}); err != nil {
 			t.Fatal(err)
 		}
 		if got := len(*targets) - before; got < 2 {
@@ -191,8 +194,8 @@ func TestRequestUserFallsBackToBroadcast(t *testing.T) {
 
 	c, targets := stubbedClient(t, func(p peer.ID, route string, _ any) ([]byte, error) {
 		switch {
-		case route == routeGetUser:
-			return json.Marshal(user{Id: "alice", NodeId: ownerNode.String()})
+		case route == warp.RouteGetUser:
+			return json.Marshal(warp.User{Id: "alice", NodeId: ownerNode.String()})
 		case p == ownerNode:
 			return nil, boom
 		default:
@@ -201,7 +204,7 @@ func TestRequestUserFallsBackToBroadcast(t *testing.T) {
 	})
 	c.good = []peer.ID{member}
 
-	bt, err := c.requestUser("alice", routeGetFollowers, getFollowersEvent{UserId: "alice"})
+	bt, err := c.RequestUser("alice", warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: "alice"})
 	if err != nil {
 		t.Fatalf("requestUser: %v", err)
 	}
@@ -223,9 +226,9 @@ func TestOwnerNodeResolutionFailures(t *testing.T) {
 	cases := map[string]func(string, any) ([]byte, error){
 		"transport error": func(string, any) ([]byte, error) { return nil, errors.New("down") },
 		"bad json":        func(string, any) ([]byte, error) { return []byte("not json"), nil },
-		"no node id":      func(string, any) ([]byte, error) { return json.Marshal(user{Id: "alice"}) },
+		"no node id":      func(string, any) ([]byte, error) { return json.Marshal(warp.User{Id: "alice"}) },
 		"bad node id": func(string, any) ([]byte, error) {
-			return json.Marshal(user{Id: "alice", NodeId: "not-a-peer-id"})
+			return json.Marshal(warp.User{Id: "alice", NodeId: "not-a-peer-id"})
 		},
 	}
 	for name, answer := range cases {
@@ -233,7 +236,7 @@ func TestOwnerNodeResolutionFailures(t *testing.T) {
 			c := newTestNode(t, "owner-fail-"+name)
 			c.good = []peer.ID{member}
 			c.stream = func(_ context.Context, _ peer.ID, route string, payload any) ([]byte, error) {
-				if route == routeGetUser {
+				if route == warp.RouteGetUser {
 					return answer(route, payload)
 				}
 				return []byte(`{}`), nil
@@ -269,7 +272,7 @@ func TestNodeSourceGetUser(t *testing.T) {
 
 	t.Run("maps a warpnet profile onto the actor fields", func(t *testing.T) {
 		s := newSource(t, func() ([]byte, error) {
-			return json.Marshal(user{
+			return json.Marshal(warp.User{
 				Id: "alice", Username: "Alice", Bio: "hi",
 				AvatarKey: "avatar", BackgroundImageKey: "bg",
 			})
@@ -298,7 +301,7 @@ func TestNodeSourceGetUser(t *testing.T) {
 		if _, ok := s.GetUser("alice"); ok {
 			t.Fatal("bad json must not resolve")
 		}
-		s = newSource(t, func() ([]byte, error) { return json.Marshal(user{}) })
+		s = newSource(t, func() ([]byte, error) { return json.Marshal(warp.User{}) })
 		if _, ok := s.GetUser("alice"); ok {
 			t.Fatal("an empty id must not resolve")
 		}
@@ -306,14 +309,14 @@ func TestNodeSourceGetUser(t *testing.T) {
 }
 
 func TestStaticSource(t *testing.T) {
-	s := staticSource{user: warpnetUser{ID: "alice", PreferredUsername: "alice", DisplayName: "Alice"}}
+	s := fediverse.StaticSource{User: fediverse.WarpnetUser{ID: "alice", PreferredUsername: "alice", DisplayName: "Alice"}}
 	if u, ok := s.GetUser("alice"); !ok || u.DisplayName != "Alice" {
 		t.Fatalf("got (%+v, %v)", u, ok)
 	}
 	if _, ok := s.GetUser("bob"); ok {
 		t.Fatal("a static source serves exactly one user")
 	}
-	if _, ok := (staticSource{}).GetUser(""); !ok {
+	if _, ok := (fediverse.StaticSource{}).GetUser(""); !ok {
 		t.Fatal("the empty fallback matches the empty username")
 	}
 }
@@ -325,7 +328,7 @@ func TestStreamToMemberWithoutADHT(t *testing.T) {
 	other := newTestNode(t, "unknown-peer")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := c.streamToMember(ctx, other.h.ID(), routeGetUser, getUserEvent{UserId: "alice"}); err == nil {
+	if _, err := c.streamToMember(ctx, other.h.ID(), warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"}); err == nil {
 		t.Fatal("expected a dial error for a peer with no known addresses")
 	}
 }
@@ -351,7 +354,7 @@ func TestStreamToMemberResolvesThroughTheDHT(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := c.streamToMember(ctx, other.h.ID(), routeGetUser, getUserEvent{UserId: "alice"}); err == nil {
+	if _, err := c.streamToMember(ctx, other.h.ID(), warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"}); err == nil {
 		t.Fatal("expected a failure for a peer no routing table knows")
 	}
 }
@@ -363,7 +366,7 @@ func TestRequestRefreshesAnEmptyRoutingTable(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.request(routeGetUser, getUserEvent{UserId: "alice"})
+		_, err := c.Request(warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"})
 		done <- err
 	}()
 	select {
@@ -400,7 +403,7 @@ func TestTryMembersSkipsARateLimitedMember(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
-	bt, err := c.tryMembers(ctx, []peer.ID{limited, member}, routeGetUser, nil)
+	bt, err := c.tryMembers(ctx, []peer.ID{limited, member}, warp.RouteGetUser, nil)
 	if err != nil {
 		t.Fatalf("tryMembers: %v", err)
 	}
@@ -413,10 +416,10 @@ func TestTryMembersSkipsARateLimitedMember(t *testing.T) {
 	if slices.Contains(c.good, limited) {
 		t.Fatalf("rate-limited peer was remembered as good: %v", c.good)
 	}
-	if !c.isThrottled(routeGetUser, limited) {
+	if !c.isThrottled(warp.RouteGetUser, limited) {
 		t.Fatal("rate-limited peer was not marked to cool down")
 	}
-	if c.isThrottled(routeGetTweets, limited) {
+	if c.isThrottled(warp.RouteGetTweets, limited) {
 		t.Fatal("cooldown leaked to another route")
 	}
 }
@@ -429,7 +432,7 @@ func TestTryMembersAllRateLimited(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
-	if _, err := c.tryMembers(ctx, []peer.ID{"a", "b"}, routeGetUser, nil); !errors.Is(err, errNodeRateLimited) {
+	if _, err := c.tryMembers(ctx, []peer.ID{"a", "b"}, warp.RouteGetUser, nil); !errors.Is(err, errNodeRateLimited) {
 		t.Fatalf("err = %v, want errNodeRateLimited", err)
 	}
 }
@@ -457,7 +460,7 @@ func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = c.tryMembers(ctx, []peer.ID{"a", "b", "c"}, routePostFollow, nil)
+		_, _ = c.tryMembers(ctx, []peer.ID{"a", "b", "c"}, warp.RoutePostFollow, nil)
 	}()
 
 	time.Sleep(3 * hedgeDelay)
@@ -475,9 +478,9 @@ func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
 func TestDemoteThrottledMovesCoolingMembersLast(t *testing.T) {
 	c := newTestNode(t, "demote")
 	cooling, ready := peer.ID("cooling"), peer.ID("ready")
-	c.markThrottled(routeGetUser, cooling)
+	c.markThrottled(warp.RouteGetUser, cooling)
 
-	got := c.demoteThrottled(routeGetUser, []peer.ID{cooling, ready})
+	got := c.demoteThrottled(warp.RouteGetUser, []peer.ID{cooling, ready})
 	if len(got) != 2 || got[0] != ready || got[1] != cooling {
 		t.Fatalf("demoteThrottled = %v, want the cooling member last but kept", got)
 	}
@@ -486,11 +489,11 @@ func TestDemoteThrottledMovesCoolingMembersLast(t *testing.T) {
 func TestLookupUserCachesTheProfile(t *testing.T) {
 	var calls int
 	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
-		if route != routeGetUser {
+		if route != warp.RouteGetUser {
 			return []byte(`{}`), nil
 		}
 		calls++
-		return json.Marshal(user{Id: "alice", Username: "Alice"})
+		return json.Marshal(warp.User{Id: "alice", Username: "Alice"})
 	})
 	c.good = []peer.ID{peer.ID("member-1")}
 
@@ -508,7 +511,7 @@ func TestLookupUserCachesTheProfile(t *testing.T) {
 func TestLookupUserDoesNotCacheAMiss(t *testing.T) {
 	var calls int
 	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
-		if route == routeGetUser {
+		if route == warp.RouteGetUser {
 			calls++
 		}
 		return []byte(`{}`), nil
