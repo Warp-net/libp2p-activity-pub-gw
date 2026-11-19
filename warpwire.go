@@ -27,11 +27,6 @@ resulting from the use or misuse of this software.
 
 package main
 
-// The Warpnet wire framing — the gateway opens a plain libp2p stream and writes
-// warpnet's signed event.Message envelope (signed with warpnet's security.Sign).
-// PSK derivation and the message/event DTOs come from warpnet's own packages
-// (security, event, domain); only the bootstrap peer list is kept local.
-
 import (
 	"bufio"
 	"bytes"
@@ -39,6 +34,13 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"time"
+
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
+
+	// The Warpnet wire framing — the gateway opens a plain libp2p stream and writes
+	// warpnet's signed event.Message envelope (signed with warpnet's security.Sign).
+	// PSK derivation and the message/event DTOs come from warpnet's own packages
+	// (security, event, domain); only the bootstrap peer list is kept local.
 
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
@@ -48,8 +50,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
-
-const defaultWarpnetNetwork = "warpnet"
 
 // defaultGatewaySeed derives the gateway's stable libp2p identity (warpnet pins
 // the resulting peer id as mastodon.GatewayNodeID, so it is not configurable).
@@ -62,20 +62,14 @@ const defaultGatewaySeed = "warpnet-activitypub-gateway"
 // are relay-only and never advertised (ForceReachabilityPrivate), so the numbers
 // matter only in that they must not clash — see TestP2PListenAddrsAreDistinct.
 var p2pListenByNetwork = map[string]string{
-	defaultWarpnetNetwork: "/ip4/0.0.0.0/tcp/4040",
-	"testnet":             "/ip4/0.0.0.0/tcp/4041",
+	warp.DefaultNetwork: "/ip4/0.0.0.0/tcp/4040",
+	"testnet":           "/ip4/0.0.0.0/tcp/4041",
 }
-
-// defaultOwnerHandle is the Mastodon account the gateway advertises as its node
-// owner (warpnet pins it as mastodon.EntryHandle, so it is not configurable) so
-// Warpnet discovery seeds it as the entry point into the Fediverse. The gateway
-// has no Warpnet user of its own.
-const defaultOwnerHandle = "warpnet@mastodon.social"
 
 // bootstrapByNetwork lists the public entry nodes per network (the network's
 // relays — the gateway's DHT bootstrap; member nodes are found via the DHT).
 var bootstrapByNetwork = map[string][]string{
-	defaultWarpnetNetwork: {
+	warp.DefaultNetwork: {
 		"/ip4/207.154.221.44/tcp/4001/p2p/12D3KooWMKZFrp1BDKg9amtkv5zWnLhuUXN32nhqMvbtMdV2hz7j",
 		"/ip4/207.154.221.44/tcp/4002/p2p/12D3KooWSjbYrsVoXzJcEtmgJLMVCbPXMzJmNN1JkEZB9LJ2rnmU",
 		"/ip4/207.154.221.44/tcp/4003/p2p/12D3KooWNXSGyfTuYc3JznW48jay73BtQgHszWfPpyF581EWcpGJ",
@@ -112,7 +106,7 @@ func streamSend(ctx context.Context, h host.Host, p peer.ID, priv ed25519.Privat
 	}
 	defer func() { _ = s.Close() }()
 
-	msg := message{
+	msg := warp.Message{
 		Body:        wjson.RawMessage(body),
 		MessageId:   uuid.New().String(),
 		NodeId:      h.ID().String(),

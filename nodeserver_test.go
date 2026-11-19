@@ -11,11 +11,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/fediverse/fediversetest"
+	"github.com/Warp-net/activity-pub-gw/internal/nostr"
+	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
+	"github.com/Warp-net/activity-pub-gw/internal/warp"
 	"github.com/Warp-net/warpnet/event"
+
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/libp2p/go-libp2p"
+
 	p2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -48,12 +55,12 @@ func newTestNode(t *testing.T, seed string) *nodeClient {
 	c := &nodeClient{
 		h:       h,
 		priv:    priv,
-		network: defaultWarpnetNetwork,
+		network: warp.DefaultNetwork,
 		relays:  map[peer.ID]struct{}{},
 		owner:   expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
 
 		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
-		users:     expirable.NewLRU[string, warpnetUser](userCacheSize, nil, userCacheTTL),
+		users:     expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c
@@ -64,19 +71,18 @@ func newTestNode(t *testing.T, seed string) *nodeClient {
 type nodeFixture struct {
 	server *nodeClient
 	client *nodeClient
-	g      *gateway
-	peer   *fakeInstance
+	g      *fediverse.Gateway
+	peer   *fediversetest.Instance
 	handle string
 	actor  string
 }
 
 func newNodeFixture(t *testing.T) *nodeFixture {
 	t.Helper()
-	g := testGateway(t)
-	g.actorIDs = expirable.NewLRU[string, string](actorIDsSize, nil, actorIDsTTL)
-	f := newFakeInstance(t).attach(g)
-	actorURL := f.actor("bob", nil)
-	f.webfingerFor("bob", actorURL)
+	f := fediversetest.NewInstance(t)
+	g := newRouterTestGateway(t, fediverse.Config{Client: f.Client()})
+	actorURL := f.Actor("bob", nil)
+	f.WebfingerFor("bob", actorURL)
 
 	server := newTestNode(t, "srv-"+t.Name())
 	client := newTestNode(t, "cli-"+t.Name())
@@ -84,9 +90,7 @@ func newNodeFixture(t *testing.T) *nodeFixture {
 	// are exercised next to it; a request it wrongly claimed would reach this
 	// dead relay and fail.
 	t.Setenv("GATEWAY_NOSTR_RELAYS", "ws://127.0.0.1:1")
-	g.nostrRelays = testRelayPool()
-	g.nostrLive = newNostrLive(newNostrBridge(g.nostrRelays, nostrRelaysFromEnv(), "", g.host), g.pushTimeline)
-	server.serveRoutes(g, defaultOwnerHandle)
+	server.serveRoutes(g, testHub(g, nostr.RelaysFromEnv()), warp.DefaultOwnerHandle)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -95,17 +99,17 @@ func newNodeFixture(t *testing.T) *nodeFixture {
 	}
 	client.remember(server.h.ID())
 
-	return &nodeFixture{server: server, client: client, g: g, peer: f, handle: "bob@" + f.host(), actor: actorURL}
+	return &nodeFixture{server: server, client: client, g: g, peer: f, handle: "bob@" + f.Host(), actor: actorURL}
 }
 
 // call streams a route to the gateway node and decodes the reply into out.
 func (fx *nodeFixture) call(t *testing.T, route string, payload, out any) []byte {
 	t.Helper()
-	bt, err := fx.client.request(route, payload)
+	bt, err := fx.client.Request(route, payload)
 	if err != nil {
 		t.Fatalf("%s: %v", route, err)
 	}
-	if rerr := nodeResponseError(bt); rerr != nil {
+	if rerr := warp.NodeResponseError(bt); rerr != nil {
 		t.Fatalf("%s: node error: %v", route, rerr)
 	}
 	if out != nil {
@@ -144,7 +148,7 @@ func TestNodeServerInfo(t *testing.T) {
 	var info map[string]any
 	fx.call(t, event.PUBLIC_GET_INFO, nil, &info)
 
-	if info["owner_id"] != defaultOwnerHandle {
+	if info["owner_id"] != warp.DefaultOwnerHandle {
 		t.Fatalf("owner = %v, want the Mastodon entry handle so discovery seeds it", info["owner_id"])
 	}
 	if info["node_id"] != fx.server.h.ID().String() {
@@ -160,7 +164,7 @@ func TestNodeServerInfo(t *testing.T) {
 	if info["relay_state"] != "off" {
 		t.Fatalf("relay_state = %v", info["relay_state"])
 	}
-	if info["network"] != defaultWarpnetNetwork {
+	if info["network"] != warp.DefaultNetwork {
 		t.Fatalf("network = %v", info["network"])
 	}
 }
@@ -169,7 +173,7 @@ func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
 	fx := newNodeFixture(t)
 
 	t.Run("a malformed envelope is dropped", func(t *testing.T) {
-		if got := fx.rawStream(t, routeGetUser, []byte("not an envelope")); len(got) != 0 {
+		if got := fx.rawStream(t, warp.RouteGetUser, []byte("not an envelope")); len(got) != 0 {
 			t.Fatalf("response = %q, want the stream dropped", got)
 		}
 	})
@@ -177,25 +181,25 @@ func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
 	// An unsigned envelope must not bypass verification, like the node's own
 	// auth middleware.
 	t.Run("an unsigned envelope is dropped", func(t *testing.T) {
-		body, err := wjson.Marshal(getUserEvent{UserId: "alice"})
+		body, err := wjson.Marshal(warp.GetUserEvent{UserId: "alice"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		env, err := wjson.Marshal(message{
+		env, err := wjson.Marshal(warp.Message{
 			Body: wjson.RawMessage(body), MessageId: "m1",
-			NodeId: fx.client.h.ID().String(), Destination: routeGetUser,
+			NodeId: fx.client.h.ID().String(), Destination: warp.RouteGetUser,
 			Timestamp: time.Now(), Version: "0.0.0",
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := fx.rawStream(t, routeGetUser, env); len(got) != 0 {
+		if got := fx.rawStream(t, warp.RouteGetUser, env); len(got) != 0 {
 			t.Fatalf("response = %q, want the stream dropped", got)
 		}
 	})
 
 	t.Run("a forged signature is dropped", func(t *testing.T) {
-		body, err := wjson.Marshal(getUserEvent{UserId: "alice"})
+		body, err := wjson.Marshal(warp.GetUserEvent{UserId: "alice"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -203,9 +207,9 @@ func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		msg := message{
+		msg := warp.Message{
 			Body: wjson.RawMessage(body), MessageId: "m2",
-			NodeId: fx.client.h.ID().String(), Destination: routeGetUser,
+			NodeId: fx.client.h.ID().String(), Destination: warp.RouteGetUser,
 			Timestamp: time.Now(), Version: "0.0.0",
 		}
 		msg.Signature = security.Sign(other, msg.SigningBytes())
@@ -213,7 +217,7 @@ func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
 		if merr != nil {
 			t.Fatal(merr)
 		}
-		if got := fx.rawStream(t, routeGetUser, env); len(got) != 0 {
+		if got := fx.rawStream(t, warp.RouteGetUser, env); len(got) != 0 {
 			t.Fatalf("response = %q, want a signature from another key refused", got)
 		}
 	})
@@ -222,34 +226,34 @@ func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
 func TestNodeServerReadRoutes(t *testing.T) {
 	fx := newNodeFixture(t)
 	f := fx.peer
-	noteURL := f.url("/users/bob/statuses/1")
+	noteURL := f.URL("/users/bob/statuses/1")
 
-	f.serveDoc("/users/bob"+pathFollowers, contentTypeAP, map[string]any{
+	f.ServeDoc("/users/bob"+fediverse.PathFollowers, fediverse.ContentTypeAP, map[string]any{
 		"totalItems": 2, "orderedItems": []any{"https://o.example/users/carol"},
 	})
-	f.serveDoc("/users/bob/following", contentTypeAP, map[string]any{
+	f.ServeDoc("/users/bob/following", fediverse.ContentTypeAP, map[string]any{
 		"totalItems": 1, "orderedItems": []any{"https://o.example/users/dave"},
 	})
-	f.serveDoc("/users/bob/outbox", contentTypeAP, map[string]any{"totalItems": 3})
-	f.serveDoc("/users/bob/statuses/1", contentTypeAP, map[string]any{
-		"type": typeNote, "id": noteURL, "attributedTo": fx.actor, "content": "<p>hello</p>",
+	f.ServeDoc("/users/bob/outbox", fediverse.ContentTypeAP, map[string]any{"totalItems": 3})
+	f.ServeDoc("/users/bob/statuses/1", fediverse.ContentTypeAP, map[string]any{
+		"type": fediverse.TypeNote, "id": noteURL, "attributedTo": fx.actor, "content": "<p>hello</p>",
 		"published": "2024-01-01T00:00:00Z",
 		"likes":     map[string]any{"totalItems": float64(4)},
 		"shares":    map[string]any{"totalItems": float64(1)},
 		"replies":   map[string]any{"totalItems": float64(2)},
 	})
-	f.serveDoc("/api/v1/statuses/1/context", "application/json", map[string]any{
+	f.ServeDoc("/api/v1/statuses/1/context", "application/json", map[string]any{
 		"ancestors": []any{},
 		"descendants": []any{map[string]any{
-			"id": "2", "uri": f.url("/users/carol/statuses/2"), "content": "<p>a reply</p>",
+			"id": "2", "uri": f.URL("/users/carol/statuses/2"), "content": "<p>a reply</p>",
 			"in_reply_to_id": "1", "account": map[string]any{"acct": "carol"},
 		}},
 	})
 
 	t.Run("get user", func(t *testing.T) {
-		var u user
-		fx.call(t, routeGetUser, getUserEvent{UserId: fx.handle}, &u)
-		if u.Id != fx.handle || u.Network != mastodonNetwork {
+		var u warp.User
+		fx.call(t, warp.RouteGetUser, warp.GetUserEvent{UserId: fx.handle}, &u)
+		if u.Id != fx.handle || u.Network != warp.MastodonNetwork {
 			t.Fatalf("user = %+v", u)
 		}
 		if u.FollowersCount != 2 || u.FollowingsCount != 1 || u.TweetsCount != 3 {
@@ -258,8 +262,8 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	})
 
 	t.Run("get users returns a one-row listing", func(t *testing.T) {
-		var resp usersResponse
-		fx.call(t, routeGetUsers, getAllUsersEvent{UserId: fx.handle}, &resp)
+		var resp warp.UsersResponse
+		fx.call(t, warp.RouteGetUsers, warp.GetAllUsersEvent{UserId: fx.handle}, &resp)
 		if len(resp.Users) != 1 || resp.Users[0].Id != fx.handle {
 			t.Fatalf("users = %+v", resp.Users)
 		}
@@ -268,11 +272,11 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	// An unknown handle must come back as an empty listing, not an error that a
 	// search UI would surface.
 	t.Run("get users tolerates an unknown handle", func(t *testing.T) {
-		bt, err := fx.client.request(routeGetUsers, getAllUsersEvent{UserId: "not-a-handle"})
+		bt, err := fx.client.Request(warp.RouteGetUsers, warp.GetAllUsersEvent{UserId: "not-a-handle"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		var resp usersResponse
+		var resp warp.UsersResponse
 		if uerr := json.Unmarshal(bt, &resp); uerr != nil {
 			t.Fatalf("decode %s: %v", bt, uerr)
 		}
@@ -282,8 +286,8 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	})
 
 	t.Run("get tweet", func(t *testing.T) {
-		var tw tweet
-		fx.call(t, routeGetTweet, getTweetEvent{TweetId: noteURL}, &tw)
+		var tw warp.Tweet
+		fx.call(t, warp.RouteGetTweet, warp.GetTweetEvent{TweetId: noteURL}, &tw)
 		if tw.Id != noteURL || tw.Text != "hello" {
 			t.Fatalf("tweet = %+v", tw)
 		}
@@ -291,11 +295,11 @@ func TestNodeServerReadRoutes(t *testing.T) {
 
 	t.Run("get tweet stats", func(t *testing.T) {
 		var stats event.TweetStatsResponse
-		fx.call(t, event.PUBLIC_GET_TWEET_STATS, getTweetEvent{TweetId: noteURL}, &stats)
+		fx.call(t, event.PUBLIC_GET_TWEET_STATS, warp.GetTweetEvent{TweetId: noteURL}, &stats)
 		if stats.ReactionsCount != 4 || stats.RetweetsCount != 1 || stats.RepliesCount != 2 {
 			t.Fatalf("stats = %+v", stats)
 		}
-		if stats.Reactions[defaultReaction] != 4 {
+		if stats.Reactions[warp.DefaultReaction] != 4 {
 			t.Fatalf("stats.Reactions = %v, want the favourites as hearts", stats.Reactions)
 		}
 	})
@@ -303,12 +307,12 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	// Warpnet folded thread replies into the tweets route, keyed by parent_id or
 	// root_id; the standalone replies route it used to serve is gone.
 	t.Run("get tweets folded into thread replies", func(t *testing.T) {
-		for _, ev := range []getAllTweetsEvent{
+		for _, ev := range []warp.GetAllTweetsEvent{
 			{ParentId: noteURL},
 			{RootId: noteURL},
 		} {
-			var resp tweetsResponse
-			fx.call(t, routeGetTweets, ev, &resp)
+			var resp warp.TweetsResponse
+			fx.call(t, warp.RouteGetTweets, ev, &resp)
 			if len(resp.Tweets) != 1 || resp.Tweets[0].Text != "a reply" {
 				t.Fatalf("tweets = %+v", resp.Tweets)
 			}
@@ -316,13 +320,13 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	})
 
 	t.Run("get followers and followings", func(t *testing.T) {
-		var fr followersResponse
-		fx.call(t, routeGetFollowers, getFollowersEvent{UserId: fx.handle}, &fr)
+		var fr warp.FollowersResponse
+		fx.call(t, warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: fx.handle}, &fr)
 		if len(fr.Followers) != 1 || fr.Followers[0] != "carol@o.example" {
 			t.Fatalf("followers = %v", fr.Followers)
 		}
-		var fg followingsResponse
-		fx.call(t, routeGetFollowings, getFollowersEvent{UserId: fx.handle}, &fg)
+		var fg warp.FollowingsResponse
+		fx.call(t, warp.RouteGetFollowings, warp.GetFollowersEvent{UserId: fx.handle}, &fg)
 		if len(fg.Followings) != 1 || fg.Followings[0] != "dave@o.example" {
 			t.Fatalf("followings = %v", fg.Followings)
 		}
@@ -330,12 +334,12 @@ func TestNodeServerReadRoutes(t *testing.T) {
 
 	t.Run("get image", func(t *testing.T) {
 		png := []byte{0x89, 'P', 'N', 'G'}
-		f.on("/img.png", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set(headerContentType, "image/png")
+		f.On("/img.png", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(fediverse.HeaderContentType, "image/png")
 			_, _ = w.Write(png)
 		})
-		var resp getImageResponse
-		fx.call(t, routeGetImage, getImageEvent{Key: f.url("/img.png")}, &resp)
+		var resp warp.GetImageResponse
+		fx.call(t, warp.RouteGetImage, warp.GetImageEvent{Key: f.URL("/img.png")}, &resp)
 		want := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 		if resp.File != want {
 			t.Fatalf("file = %q", resp.File)
@@ -354,30 +358,30 @@ func TestNodeServerReadRoutes(t *testing.T) {
 func TestNodeServerWriteRoutes(t *testing.T) {
 	fx := newNodeFixture(t)
 	f := fx.peer
-	noteURL := f.url("/users/bob/statuses/1")
-	f.serveDoc("/users/bob/statuses/1", contentTypeAP, map[string]any{
-		"type": typeNote, "id": noteURL, "attributedTo": fx.actor, "content": "<p>hello</p>",
+	noteURL := f.URL("/users/bob/statuses/1")
+	f.ServeDoc("/users/bob/statuses/1", fediverse.ContentTypeAP, map[string]any{
+		"type": fediverse.TypeNote, "id": noteURL, "attributedTo": fx.actor, "content": "<p>hello</p>",
 		"published": "2024-01-01T00:00:00Z",
 		"likes":     map[string]any{"totalItems": float64(3)},
 	})
 
 	t.Run("react and unreact", func(t *testing.T) {
 		var resp event.ReactionsCountResponse
-		fx.call(t, routePostReact, reactionEvent{
-			OwnerId: "alice", TweetId: noteURL, Emoji: defaultReaction,
+		fx.call(t, warp.RoutePostReact, warp.ReactionEvent{
+			OwnerId: "alice", TweetId: noteURL, Emoji: warp.DefaultReaction,
 		}, &resp)
 		if resp.Count != 4 {
 			t.Fatalf("count = %d", resp.Count)
 		}
-		if resp.Reactions[defaultReaction] != 4 {
+		if resp.Reactions[warp.DefaultReaction] != 4 {
 			t.Fatalf("reactions = %v, want the count attributed to the heart", resp.Reactions)
 		}
-		fx.call(t, routePostUnreact, reactionEvent{OwnerId: "alice", TweetId: noteURL}, &resp)
+		fx.call(t, warp.RoutePostUnreact, warp.ReactionEvent{OwnerId: "alice", TweetId: noteURL}, &resp)
 		if resp.Count != 2 {
 			t.Fatalf("undo count = %d", resp.Count)
 		}
-		got := f.delivered()
-		if len(got) != 2 || got[0].doc["type"] != typeLike || got[1].doc["type"] != typeUndo {
+		got := f.Delivered()
+		if len(got) != 2 || got[0].Doc["type"] != fediverse.TypeLike || got[1].Doc["type"] != fediverse.TypeUndo {
 			t.Fatalf("delivered = %+v", got)
 		}
 	})
@@ -386,17 +390,17 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	// predates reactions sends none — which warpnet reads as the default heart.
 	// Dropping it here would lose the favourite for every such client.
 	t.Run("a react with no emoji is favourited as the default heart", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		var resp event.ReactionsCountResponse
-		fx.call(t, routePostReact, reactionEvent{OwnerId: "alice", TweetId: noteURL}, &resp)
+		fx.call(t, warp.RoutePostReact, warp.ReactionEvent{OwnerId: "alice", TweetId: noteURL}, &resp)
 		if resp.Count != 4 {
 			t.Fatalf("count = %d, want the favourite counted", resp.Count)
 		}
-		if resp.Reactions[defaultReaction] != 4 {
+		if resp.Reactions[warp.DefaultReaction] != 4 {
 			t.Fatalf("reactions = %v, want the count under the default heart", resp.Reactions)
 		}
-		got := f.delivered()[before:]
-		if len(got) != 1 || got[0].doc["type"] != typeLike {
+		got := f.Delivered()[before:]
+		if len(got) != 1 || got[0].Doc["type"] != fediverse.TypeLike {
 			t.Fatalf("delivered = %+v, want a favourite", got)
 		}
 	})
@@ -404,13 +408,13 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	// A reaction whose emoji cannot be a database key is refused, like the node
 	// refuses it locally — not silently swallowed.
 	t.Run("a malformed emoji is an error", func(t *testing.T) {
-		bt, err := fx.client.request(routePostReact, reactionEvent{
+		bt, err := fx.client.Request(warp.RoutePostReact, warp.ReactionEvent{
 			OwnerId: "alice", TweetId: noteURL, Emoji: "a/b",
 		})
 		if err != nil {
 			t.Fatalf("request: %v", err)
 		}
-		if rerr := nodeResponseError(bt); rerr == nil {
+		if rerr := warp.NodeResponseError(bt); rerr == nil {
 			t.Fatalf("response = %s, want an error envelope", bt)
 		}
 	})
@@ -418,26 +422,26 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	// Mastodon has one reaction, the favourite, so only the default heart maps
 	// onto it — any other emoji must be accepted without federating a favourite.
 	t.Run("a non-heart reaction is accepted but not federated", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		var resp event.ReactionsCountResponse
-		fx.call(t, routePostReact, reactionEvent{
+		fx.call(t, warp.RoutePostReact, warp.ReactionEvent{
 			OwnerId: "alice", TweetId: noteURL, Emoji: "\U0001F525",
 		}, &resp)
 		if resp.Count != 0 {
 			t.Fatalf("count = %d, want 0: no favourite was made", resp.Count)
 		}
-		if now := len(f.delivered()); now != before {
+		if now := len(f.Delivered()); now != before {
 			t.Fatalf("delivered %d activities, want none", now-before)
 		}
 	})
 
 	t.Run("follow and unfollow", func(t *testing.T) {
-		before := len(f.delivered())
-		fx.call(t, routePostFollow, newFollowEvent{FollowerId: "alice", FollowingId: fx.handle}, nil)
-		fx.call(t, routePostUnfollow, newFollowEvent{FollowerId: "alice", FollowingId: fx.handle}, nil)
-		waitFor(t, "both follow activities", func() bool { return len(f.delivered()) >= before+2 })
-		got := f.delivered()[before:]
-		if got[0].doc["type"] != typeFollow || got[1].doc["type"] != typeUndo {
+		before := len(f.Delivered())
+		fx.call(t, warp.RoutePostFollow, warp.NewFollowEvent{FollowerId: "alice", FollowingId: fx.handle}, nil)
+		fx.call(t, warp.RoutePostUnfollow, warp.NewFollowEvent{FollowerId: "alice", FollowingId: fx.handle}, nil)
+		nostrtest.WaitFor(t, "both follow activities", func() bool { return len(f.Delivered()) >= before+2 })
+		got := f.Delivered()[before:]
+		if got[0].Doc["type"] != fediverse.TypeFollow || got[1].Doc["type"] != fediverse.TypeUndo {
 			t.Fatalf("delivered = %+v", got)
 		}
 	})
@@ -446,10 +450,10 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	// carrying a parent. A top-level post arrives on the tweet route through
 	// follower gossip and is federated in real time.
 	t.Run("public reply route: a reply federates as a reply", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		parent := noteURL
-		var echoed tweet
-		fx.call(t, routePostReply, tweet{
+		var echoed warp.Tweet
+		fx.call(t, warp.RoutePostReply, warp.Tweet{
 			Id: "r2", ParentId: &parent, RootId: noteURL, UserId: "alice",
 			Text: "threaded", CreatedAt: time.Unix(0, 0),
 		}, &echoed)
@@ -457,49 +461,49 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 		if echoed.Id != "r2" || echoed.ParentId == nil || *echoed.ParentId != noteURL {
 			t.Fatalf("echo = %+v", echoed)
 		}
-		got := f.delivered()[before:]
-		if len(got) != 1 || got[0].doc["type"] != typeCreate {
+		got := f.Delivered()[before:]
+		if len(got) != 1 || got[0].Doc["type"] != fediverse.TypeCreate {
 			t.Fatalf("delivered = %+v", got)
 		}
 	})
 
 	// A node that predates the move still forwards replies over the tweet route.
 	t.Run("private tweet route: a reply still federates as a reply", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		parent := noteURL
-		var echoed tweet
-		fx.call(t, routePostTweet, tweet{
+		var echoed warp.Tweet
+		fx.call(t, warp.RoutePostTweet, warp.Tweet{
 			Id: "r3", ParentId: &parent, RootId: noteURL, UserId: "alice",
 			Text: "legacy threaded", CreatedAt: time.Unix(0, 0),
 		}, &echoed)
 		if echoed.Id != "r3" {
 			t.Fatalf("echo = %+v", echoed)
 		}
-		got := f.delivered()[before:]
-		if len(got) != 1 || got[0].doc["type"] != typeCreate {
+		got := f.Delivered()[before:]
+		if len(got) != 1 || got[0].Doc["type"] != fediverse.TypeCreate {
 			t.Fatalf("delivered = %+v", got)
 		}
 	})
 
 	t.Run("private tweet route: a top-level post is echoed and federated", func(t *testing.T) {
-		if err := fx.g.followers.Add("alice", fx.actor); err != nil {
+		if err := fx.g.Followers.Add("alice", fx.actor); err != nil {
 			t.Fatal(err)
 		}
-		before := len(f.delivered())
-		var echoed tweet
-		fx.call(t, routePostTweet, tweet{
+		before := len(f.Delivered())
+		var echoed warp.Tweet
+		fx.call(t, warp.RoutePostTweet, warp.Tweet{
 			Id: "t1", UserId: "alice", Text: "top level", CreatedAt: time.Unix(0, 0),
 		}, &echoed)
 		if echoed.Id != "t1" {
 			t.Fatalf("echo = %+v", echoed)
 		}
-		waitFor(t, "the gossiped post to federate", func() bool { return len(f.delivered()) > before })
-		got := f.delivered()[before]
-		if got.doc["type"] != typeCreate {
-			t.Fatalf("delivered = %+v", got.doc)
+		nostrtest.WaitFor(t, "the gossiped post to federate", func() bool { return len(f.Delivered()) > before })
+		got := f.Delivered()[before]
+		if got.Doc["type"] != fediverse.TypeCreate {
+			t.Fatalf("delivered = %+v", got.Doc)
 		}
-		n, _ := got.doc["object"].(map[string]any)
-		if n == nil || n["id"] != fx.g.actorID("alice")+pathStatuses+"t1" {
+		n, _ := got.Doc["object"].(map[string]any)
+		if n == nil || n["id"] != fx.g.ActorID("alice")+fediverse.PathStatuses+"t1" {
 			t.Fatalf("note = %+v", n)
 		}
 	})
@@ -507,70 +511,70 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	// Warpnet delivers a followed author's new tweet over the public timeline
 	// route now; the gateway federates it the same way.
 	t.Run("timeline route: a top-level post is echoed and federated", func(t *testing.T) {
-		if err := fx.g.followers.Add("alice", fx.actor); err != nil {
+		if err := fx.g.Followers.Add("alice", fx.actor); err != nil {
 			t.Fatal(err)
 		}
-		before := len(f.delivered())
-		var echoed tweet
-		fx.call(t, routePostTimeline, tweet{
+		before := len(f.Delivered())
+		var echoed warp.Tweet
+		fx.call(t, warp.RoutePostTimeline, warp.Tweet{
 			Id: "t2", UserId: "alice", Text: "delivered to timeline", CreatedAt: time.Unix(0, 0),
 		}, &echoed)
 		if echoed.Id != "t2" {
 			t.Fatalf("echo = %+v", echoed)
 		}
-		waitFor(t, "the delivered post to federate", func() bool { return len(f.delivered()) > before })
-		got := f.delivered()[before]
-		if got.doc["type"] != typeCreate {
-			t.Fatalf("delivered = %+v", got.doc)
+		nostrtest.WaitFor(t, "the delivered post to federate", func() bool { return len(f.Delivered()) > before })
+		got := f.Delivered()[before]
+		if got.Doc["type"] != fediverse.TypeCreate {
+			t.Fatalf("delivered = %+v", got.Doc)
 		}
-		n, _ := got.doc["object"].(map[string]any)
-		if n == nil || n["id"] != fx.g.actorID("alice")+pathStatuses+"t2" {
+		n, _ := got.Doc["object"].(map[string]any)
+		if n == nil || n["id"] != fx.g.ActorID("alice")+fediverse.PathStatuses+"t2" {
 			t.Fatalf("note = %+v", n)
 		}
 	})
 
 	t.Run("timeline route: a reply is acknowledged but not federated", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		parent := noteURL
-		var echoed tweet
-		fx.call(t, routePostTimeline, tweet{
+		var echoed warp.Tweet
+		fx.call(t, warp.RoutePostTimeline, warp.Tweet{
 			Id: "r4", ParentId: &parent, RootId: noteURL, UserId: "alice",
 			Text: "reply via timeline", CreatedAt: time.Unix(0, 0),
 		}, &echoed)
 		if echoed.Id != "r4" {
 			t.Fatalf("echo = %+v", echoed)
 		}
-		if got := f.delivered()[before:]; len(got) != 0 {
+		if got := f.Delivered()[before:]; len(got) != 0 {
 			t.Fatalf("a reply must not federate from the timeline route, delivered = %+v", got)
 		}
 	})
 
 	t.Run("retweet and unretweet", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		by := "alice"
-		fx.call(t, routePostRetweet, tweet{Id: noteURL, UserId: "carol", RetweetedBy: &by}, nil)
-		fx.call(t, routePostUnretweet, unretweetEvent{RetweeterId: "alice", TweetId: noteURL}, nil)
-		got := f.delivered()[before:]
-		if len(got) != 2 || got[0].doc["type"] != typeAnnounce || got[1].doc["type"] != typeUndo {
+		fx.call(t, warp.RoutePostRetweet, warp.Tweet{Id: noteURL, UserId: "carol", RetweetedBy: &by}, nil)
+		fx.call(t, warp.RoutePostUnretweet, warp.UnretweetEvent{RetweeterId: "alice", TweetId: noteURL}, nil)
+		got := f.Delivered()[before:]
+		if len(got) != 2 || got[0].Doc["type"] != fediverse.TypeAnnounce || got[1].Doc["type"] != fediverse.TypeUndo {
 			t.Fatalf("delivered = %+v", got)
 		}
-		if got[0].doc["actor"] != fx.g.actorID("alice") {
-			t.Fatalf("boost actor = %v, want the retweeter", got[0].doc["actor"])
+		if got[0].Doc["actor"] != fx.g.ActorID("alice") {
+			t.Fatalf("boost actor = %v, want the retweeter", got[0].Doc["actor"])
 		}
 	})
 
 	t.Run("delete", func(t *testing.T) {
-		before := len(f.delivered())
+		before := len(f.Delivered())
 		// Without thread ids there is no Mastodon note to target: acknowledge only.
-		fx.call(t, routeDeleteTweet, deleteTweetEvent{UserId: "alice", TweetId: "x"}, nil)
-		if len(f.delivered()) != before {
+		fx.call(t, warp.RouteDeleteTweet, warp.DeleteTweetEvent{UserId: "alice", TweetId: "x"}, nil)
+		if len(f.Delivered()) != before {
 			t.Fatal("a non-reply delete must not federate")
 		}
-		fx.call(t, routeDeleteTweet, deleteTweetEvent{
+		fx.call(t, warp.RouteDeleteTweet, warp.DeleteTweetEvent{
 			UserId: "alice", TweetId: "r1", ParentId: noteURL, RootId: noteURL,
 		}, nil)
-		got := f.delivered()[before:]
-		if len(got) != 1 || got[0].doc["type"] != typeDelete {
+		got := f.Delivered()[before:]
+		if len(got) != 1 || got[0].Doc["type"] != fediverse.TypeDelete {
 			t.Fatalf("delivered = %+v", got)
 		}
 	})
@@ -580,11 +584,11 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 // stream — the caller has no other way to tell what went wrong.
 func TestNodeServerReturnsAnErrorEnvelope(t *testing.T) {
 	fx := newNodeFixture(t)
-	bt, err := fx.client.request(routeGetTweet, getTweetEvent{TweetId: fx.peer.url("/notes/ghost")})
+	bt, err := fx.client.Request(warp.RouteGetTweet, warp.GetTweetEvent{TweetId: fx.peer.URL("/notes/ghost")})
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	if rerr := nodeResponseError(bt); rerr == nil {
+	if rerr := warp.NodeResponseError(bt); rerr == nil {
 		t.Fatalf("response = %s, want an error envelope", bt)
 	}
 }
@@ -620,36 +624,71 @@ func TestWrapJSON(t *testing.T) {
 // so the client can repaint its chips without a second round-trip. An unreact
 // names no emoji, so only the total travels.
 func TestReactionsCount(t *testing.T) {
-	got := reactionsCount(defaultReaction, 3)
-	if got.Count != 3 || got.Reactions[defaultReaction] != 3 {
+	got := reactionsCount(warp.DefaultReaction, 3)
+	if got.Count != 3 || got.Reactions[warp.DefaultReaction] != 3 {
 		t.Fatalf("react = %+v", got)
 	}
 	if got := reactionsCount("", 2); got.Count != 2 || got.Reactions != nil {
 		t.Fatalf("unreact = %+v, want the total only", got)
 	}
 	// A zero tally must not claim an emoji with no reactions behind it.
-	if got := reactionsCount(defaultReaction, 0); got.Reactions != nil {
+	if got := reactionsCount(warp.DefaultReaction, 0); got.Reactions != nil {
 		t.Fatalf("zero = %+v, want no breakdown", got)
 	}
 }
 
 func TestRetweeterOfAndRetweetObject(t *testing.T) {
 	by := "alice"
-	if got := retweeterOf(tweet{UserId: "carol", RetweetedBy: &by}); got != "alice" {
+	if got := retweeterOf(warp.Tweet{UserId: "carol", RetweetedBy: &by}); got != "alice" {
 		t.Fatalf("retweeter = %q, want the booster", got)
 	}
 	empty := ""
-	if got := retweeterOf(tweet{UserId: "carol", RetweetedBy: &empty}); got != "carol" {
+	if got := retweeterOf(warp.Tweet{UserId: "carol", RetweetedBy: &empty}); got != "carol" {
 		t.Fatalf("retweeter = %q, want the author when RetweetedBy is blank", got)
 	}
-	if got := retweeterOf(tweet{UserId: "carol"}); got != "carol" {
+	if got := retweeterOf(warp.Tweet{UserId: "carol"}); got != "carol" {
 		t.Fatalf("retweeter = %q", got)
 	}
 
-	if got := retweetObject(tweet{Id: "https://m/1", RootId: "https://m/0"}); got != "https://m/1" {
+	if got := retweetObject(warp.Tweet{Id: "https://m/1", RootId: "https://m/0"}); got != "https://m/1" {
 		t.Fatalf("object = %q, want the tweet id", got)
 	}
-	if got := retweetObject(tweet{RootId: "https://m/0"}); got != "https://m/0" {
+	if got := retweetObject(warp.Tweet{RootId: "https://m/0"}); got != "https://m/0" {
 		t.Fatalf("object = %q, want the root as fallback", got)
 	}
+}
+
+func TestNodeServerWhoToFollow(t *testing.T) {
+	fx := newNodeFixture(t)
+	t.Setenv("GATEWAY_DISCOVERY_HOST", fx.peer.Host())
+	fx.peer.ServeDoc("/api/v1/directory", "application/json", []any{map[string]any{"acct": "alice", "username": "Alice"}})
+	for _, route := range []string{event.PUBLIC_GET_WHOTOFOLLOW, warp.RouteGetUsers} {
+		var resp warp.UsersResponse
+		fx.call(t, route, warp.GetAllUsersEvent{UserId: warp.DefaultOwnerHandle}, &resp)
+		if len(resp.Users) != 1 || resp.Users[0].NodeId != fx.server.h.ID().String() {
+			t.Fatalf("%s response = %+v", route, resp)
+		}
+	}
+}
+
+// newRouterTestGateway builds a gateway as main does, serving alice.
+func newRouterTestGateway(t *testing.T, cfg fediverse.Config) *fediverse.Gateway {
+	t.Helper()
+	t.Setenv("GATEWAY_AP_MIRROR", "")
+	key, err := fediverse.LoadOrCreateKey(t.TempDir() + "/key.pem")
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	cfg.Host, cfg.Key, cfg.AllowPrivateTargets = "gw.example", key, true
+	if cfg.Source == nil {
+		cfg.Source = fediverse.StaticSource{User: fediverse.WarpnetUser{ID: "alice", PreferredUsername: "alice", DisplayName: "Alice"}}
+	}
+	if cfg.Client == nil {
+		cfg.Client = http.DefaultClient
+	}
+	g, err := fediverse.New(cfg)
+	if err != nil {
+		t.Fatalf("gateway: %v", err)
+	}
+	return g
 }
