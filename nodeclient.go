@@ -71,6 +71,11 @@ var (
 const (
 	ownerCacheSize = 1024
 	ownerCacheTTL  = 10 * time.Minute
+
+	// A node's bridge key is kept while it keeps writing to the gateway
+	// (its periodic info requests renew it), and forgotten soon after.
+	bridgeKeySize = 32
+	bridgeKeyTTL  = time.Hour
 )
 
 // Request timing. A route request used to share a single 1-minute budget across
@@ -112,6 +117,8 @@ type nodeClient struct {
 	mu    sync.Mutex
 	good  []peer.ID                       // member nodes known to answer data routes; tried first
 	owner *expirable.LRU[string, peer.ID] // userID -> its home node (domain.User.NodeId); user-scoped routes target it
+	// bridgeKeys holds, in memory only, the bridge key each node last sent.
+	bridgeKeys *expirable.LRU[peer.ID, []byte]
 
 	throttled *expirable.LRU[string, struct{}]
 	users     *expirable.LRU[string, fediverse.WarpnetUser]
@@ -251,9 +258,10 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 
 	c := &nodeClient{
 		h: h, priv: priv, dht: kdht, network: network, relays: relays,
-		owner:     expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
-		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
-		users:     expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
+		owner:      expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		bridgeKeys: expirable.NewLRU[peer.ID, []byte](ownerCacheSize, nil, bridgeKeyTTL),
+		throttled:  expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
+		users:      expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c, nil

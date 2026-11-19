@@ -27,11 +27,12 @@ resulting from the use or misuse of this software.
 
 package nostr
 
-// Nostr keys of Warpnet users. Each user's node derives the key from its own
-// identity and hands it to the gateway on request; the gateway signs with it
-// and never stores it. Only public keys are remembered.
+// Nostr keys of Warpnet users. Each user's node derives a bridge key from its
+// own identity and sends it to the gateway with its messages; the gateway turns
+// it into the user's secp256k1 key, so every user has their own npub.
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"strings"
 	"time"
@@ -42,13 +43,14 @@ import (
 )
 
 const (
+	nostrKeyDomain = "warpnet/nostr/v1"
 	nostrOwnedKeys = 1 << 16
 	nostrPubKeyTTL = time.Hour
 )
 
-// KeySource asks a user's home node for their Nostr secret key.
+// KeySource gives the bridge key a user's own node sent.
 type KeySource interface {
-	NostrKey(network, userID string) ([32]byte, bool)
+	BridgeKey(network, userID string) ([]byte, bool)
 }
 
 type Keys struct {
@@ -69,8 +71,8 @@ func NewKeys(source KeySource) *Keys {
 	}
 }
 
-// secretKey fetches a Warpnet user's key from their node; only ULID accounts
-// have one.
+// secretKey is a Warpnet user's key, from their node's bridge key; only ULID
+// accounts have one.
 func (k *Keys) secretKey(network, userID string) ([32]byte, bool) {
 	var sk [32]byte
 	if k == nil || k.source == nil || network == "" {
@@ -80,18 +82,26 @@ func (k *Keys) secretKey(network, userID string) ([32]byte, bool) {
 		return sk, false
 	}
 	userID = strings.ToUpper(userID)
-	sk, ok := k.source.NostrKey(network, userID)
+	bridge, ok := k.source.BridgeKey(network, userID)
 	if !ok {
 		return sk, false
 	}
-	var s btcec.ModNScalar
-	if overflow := s.SetByteSlice(sk[:]); overflow || s.IsZero() {
-		return [32]byte{}, false
-	}
+	sk = nostrSecret(bridge)
 	pk := publicKeyHex(sk)
 	k.owned.Add(pk, ownedKey{network: network, userID: userID})
 	k.pubs.Add(network+"\x00"+userID, pk)
 	return sk, true
+}
+
+// nostrSecret maps a bridge key to a valid secp256k1 scalar.
+func nostrSecret(bridge []byte) [32]byte {
+	for counter := byte(0); ; counter++ {
+		sk := sha256.Sum256(append(append([]byte(nostrKeyDomain), bridge...), counter))
+		var s btcec.ModNScalar
+		if overflow := s.SetByteSlice(sk[:]); !overflow && !s.IsZero() {
+			return sk
+		}
+	}
 }
 
 // pubKey is a Warpnet user's Nostr public key.

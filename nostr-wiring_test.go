@@ -40,6 +40,8 @@ import (
 	"github.com/Warp-net/activity-pub-gw/internal/nostr"
 	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	wjson "github.com/Warp-net/warpnet/json"
+	"github.com/Warp-net/warpnet/security"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -118,8 +120,9 @@ func testHub(g *fediverse.Gateway, relays []string) *nostrHub {
 // fixedNodeKeys hands every user the same key, standing in for their nodes.
 type fixedNodeKeys struct{}
 
-func (fixedNodeKeys) NostrKey(string, string) ([32]byte, bool) {
-	return sha256.Sum256([]byte("node key")), true
+func (fixedNodeKeys) BridgeKey(string, string) ([]byte, bool) {
+	sum := sha256.Sum256([]byte("node key"))
+	return sum[:], true
 }
 
 func testKeys(t *testing.T) *nostr.Keys {
@@ -127,47 +130,55 @@ func testKeys(t *testing.T) *nostr.Keys {
 	return nostr.NewKeys(fixedNodeKeys{})
 }
 
-// keyNode is a user's node answering the gateway's key request.
-type keyNode struct {
-	owner peer.ID
-	asked []peer.ID
-	resp  string
+// bridgeEnvelope is a node's signed message to the gateway carrying its key.
+type bridgeEnvelope struct {
+	warp.Message
+	BridgeKey string `json:"bridge_key"`
 }
 
-func (k *keyNode) stream(_ context.Context, p peer.ID, route string, _ any) ([]byte, error) {
-	k.asked = append(k.asked, p)
-	if route != warp.RouteGetNostrKey {
-		return []byte(`{}`), nil
+func signedBridgeEnvelope(t *testing.T, signer []byte, from, key string) []byte {
+	t.Helper()
+	body, err := wjson.Marshal(warp.GetUserEvent{UserId: "alice"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	return []byte(k.resp), nil
+	msg := warp.Message{
+		Body: wjson.RawMessage(body), MessageId: "m-" + key[:4], NodeId: from,
+		Destination: warp.RouteGetUser, Timestamp: time.Now(), Version: "0.0.0",
+	}
+	msg.Signature = security.Sign(signer, msg.SigningBytes())
+	env, err := wjson.Marshal(bridgeEnvelope{Message: msg, BridgeKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
 }
 
-func TestNostrKeyIsAskedOfTheOwnersNode(t *testing.T) {
+func TestBridgeKeyComesFromTheUsersOwnNode(t *testing.T) {
 	const user = "01KZS1PJ7ZCYGZ1AGARA8B2G9N"
-	c := newTestNode(t, "nostr-key-"+t.Name())
-	node := &keyNode{owner: newTestNode(t, "nostr-key-owner").h.ID()}
-	c.owner.Add(user, node.owner)
-	c.stream = node.stream
+	fx := newNodeFixture(t)
+	from := fx.client.h.ID()
+	own, err := fx.client.h.Peerstore().PrivKey(from).Raw()
+	if err != nil {
+		t.Fatal(err)
+	}
+	forger, _ := security.GenerateKeyFromSeed([]byte("not-the-sender"))
+
+	forged := strings.Repeat("cd", 32)
+	fx.rawStream(t, warp.RouteGetUser, signedBridgeEnvelope(t, forger, from.String(), forged))
+	if _, ok := fx.server.bridgeKeys.Get(from); ok {
+		t.Fatal("a key in an envelope that fails its signature must be dropped")
+	}
 
 	key := strings.Repeat("ab", 32)
-	node.resp = `{"user_id":"` + user + `","key":"` + key + `"}`
-	sk, ok := c.NostrKey(user)
-	if !ok || hex.EncodeToString(sk[:]) != key {
-		t.Fatalf("key = %x, %v", sk, ok)
+	fx.rawStream(t, warp.RouteGetUser, signedBridgeEnvelope(t, own, from.String(), key))
+	fx.server.owner.Add(user, from)
+	got, ok := fx.server.BridgeKey(user)
+	if !ok || hex.EncodeToString(got) != key {
+		t.Fatalf("bridge key = %x, %v; want the one the user's node sent", got, ok)
 	}
-	if len(node.asked) != 1 || node.asked[0] != node.owner {
-		t.Fatalf("asked %v; only the owner's node may be asked", node.asked)
-	}
-
-	for _, bad := range []string{
-		`{"user_id":"01KSGHBHKG0N77T6A3RZV8W050","key":"` + key + `"}`,
-		`{"user_id":"` + user + `","key":"zz"}`,
-		`{"user_id":"` + user + `","key":"abcd"}`,
-		`{"code":1,"message":"nostr key: the owner did not allow Nostr"}`,
-	} {
-		node.resp = bad
-		if _, ok := c.NostrKey(user); ok {
-			t.Errorf("answer %s must not give a key", bad)
-		}
+	fx.server.owner.Add(user, fx.server.h.ID())
+	if _, ok := fx.server.BridgeKey(user); ok {
+		t.Fatal("another node's key must not stand for the user")
 	}
 }

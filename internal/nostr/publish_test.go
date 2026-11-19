@@ -68,15 +68,13 @@ func consenting(id string) warp.User {
 	return warp.User{Id: id, Metadata: map[string]string{nostrConsentKey: nostrConsentAllow}}
 }
 
-// fakeNodeKeys stands in for users' nodes handing out their keys: one key
-// per network and user, from a test secret.
+// fakeNodeKeys stands in for users' nodes sending their bridge keys: one per
+// network and user, from a test secret.
 type fakeNodeKeys struct{ secret string }
 
-func (f fakeNodeKeys) NostrKey(network, userID string) ([32]byte, bool) {
-	var sk [32]byte
+func (f fakeNodeKeys) BridgeKey(network, userID string) ([]byte, bool) {
 	sum := sha256.Sum256([]byte(f.secret + "\x00" + network + "\x00" + strings.ToUpper(userID)))
-	copy(sk[:], sum[:])
-	return sk, true
+	return sum[:], true
 }
 
 func testKeys(t *testing.T) *Keys {

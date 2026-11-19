@@ -53,11 +53,12 @@ func newTestNode(t *testing.T, seed string) *nodeClient {
 	t.Cleanup(func() { _ = h.Close() })
 
 	c := &nodeClient{
-		h:       h,
-		priv:    priv,
-		network: warp.DefaultNetwork,
-		relays:  map[peer.ID]struct{}{},
-		owner:   expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		h:          h,
+		priv:       priv,
+		network:    warp.DefaultNetwork,
+		relays:     map[peer.ID]struct{}{},
+		owner:      expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		bridgeKeys: expirable.NewLRU[peer.ID, []byte](ownerCacheSize, nil, bridgeKeyTTL),
 
 		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
 		users:     expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),

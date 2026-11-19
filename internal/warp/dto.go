@@ -49,11 +49,9 @@ const (
 	RouteGetTweets     = event.PUBLIC_GET_TWEETS
 	RouteGetFollowers  = event.PUBLIC_GET_FOLLOWERS
 	RouteGetFollowings = event.PUBLIC_GET_FOLLOWINGS
-	// RouteGetNostrKey is answered by a user's own node, to the gateway only.
-	RouteGetNostrKey  = "/public/get/nostr/key/0.0.0"
-	RouteGetImage     = event.PUBLIC_GET_IMAGE
-	RoutePostFollow   = event.PUBLIC_POST_FOLLOW
-	RoutePostUnfollow = event.PUBLIC_POST_UNFOLLOW
+	RouteGetImage      = event.PUBLIC_GET_IMAGE
+	RoutePostFollow    = event.PUBLIC_POST_FOLLOW
+	RoutePostUnfollow  = event.PUBLIC_POST_UNFOLLOW
 	// RoutePostReact/routePostUnreact are warpnet's reaction routes; they
 	// replaced the binary like/unlike ones. A reaction carries an emoji, and
 	// the heart (defaultReaction) is the one that maps to a Mastodon
@@ -83,15 +81,10 @@ type (
 // Request/response event payloads (warpnet's own types). GetAllTweetsEvent and
 // GetTweetEvent now carry root_id/parent_id themselves, so the thread ids the
 // gateway needs no longer have to be decoded into local shadow structs.
-// GetNostrKeyEvent asks a user's node for their Nostr secret key; the answer
-// is a GetNostrKeyResponse with the key in hex.
-type GetNostrKeyEvent struct {
-	UserId string `json:"user_id"`
-}
-
-type GetNostrKeyResponse struct {
-	UserId string `json:"user_id"`
-	Key    string `json:"key"`
+// BridgeEnvelope is the part of a node's message envelope only the gateway
+// gets: the hex key it acts with for the sender on bridged networks.
+type BridgeEnvelope struct {
+	BridgeKey string `json:"bridge_key"`
 }
 
 type (

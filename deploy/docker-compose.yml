@@ -17,7 +17,7 @@ services:
       - GATEWAY_NOSTR_RELAYS=${GATEWAY_NOSTR_RELAYS:-}
       - GATEWAY_DISABLE_NOSTR=${GATEWAY_DISABLE_NOSTR:-}
       # Secret seed of the gateway's libp2p identity (CI secret). warpnet pins
-      # its peer id; nodes hand users' Nostr keys only to that peer.
+      # its peer id; nodes send their bridge keys only to that peer.
       - GATEWAY_P2P_SEED=${GATEWAY_P2P_SEED:-}
       # Writing to Nostr stays off until the node-facing sender check is in.
       - GATEWAY_NOSTR_PUBLISH=${GATEWAY_NOSTR_PUBLISH:-}

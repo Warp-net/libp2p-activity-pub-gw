@@ -37,6 +37,7 @@ import (
 	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
 	"github.com/Warp-net/activity-pub-gw/internal/nostr"
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // nostrHub wires the Nostr bridge into the gateway: one relay pool and live
@@ -112,35 +113,37 @@ func (c *nodeClient) HomeUser(userID string) (warp.User, bool) {
 	return u, true
 }
 
-// NostrKey asks userID's own node for their Nostr secret key. The node answers
-// only this gateway and only with consent; the key is used and dropped.
-func (c *nodeClient) NostrKey(userID string) ([32]byte, bool) {
-	var sk [32]byte
-	bt, _, ok := c.askOwner(userID, warp.RouteGetNostrKey, warp.GetNostrKeyEvent{UserId: userID})
-	if !ok {
-		return sk, false
+// rememberBridgeKey keeps the bridge key a node sent in memory only, under
+// the peer that sent it.
+func (c *nodeClient) rememberBridgeKey(from peer.ID, hexKey string) {
+	if hexKey == "" {
+		return
 	}
-	var resp warp.GetNostrKeyResponse
-	if json.Unmarshal(bt, &resp) != nil || !strings.EqualFold(resp.UserId, userID) {
-		return sk, false
+	key, err := hex.DecodeString(hexKey)
+	if err != nil || len(key) != bridgeKeySize {
+		return
 	}
-	raw, err := hex.DecodeString(resp.Key)
-	if err != nil || len(raw) != len(sk) {
-		return sk, false
-	}
-	copy(sk[:], raw)
-	return sk, true
+	c.bridgeKeys.Add(from, key)
 }
 
-// nodeKeys fetches users' Nostr keys through the client of their network.
+// BridgeKey is the key userID's own node last sent, if it is still fresh.
+func (c *nodeClient) BridgeKey(userID string) ([]byte, bool) {
+	owner, ok := c.ownerNode(userID)
+	if !ok {
+		return nil, false
+	}
+	return c.bridgeKeys.Get(owner)
+}
+
+// nodeKeys reads users' bridge keys through the client of their network.
 type nodeKeys map[string]*nodeClient
 
-func (n nodeKeys) NostrKey(network, userID string) ([32]byte, bool) {
+func (n nodeKeys) BridgeKey(network, userID string) ([]byte, bool) {
 	c := n[network]
 	if c == nil {
-		return [32]byte{}, false
+		return nil, false
 	}
-	return c.NostrKey(userID)
+	return c.BridgeKey(userID)
 }
 
 // askOwner sends a route to the node that owns userID only, never falling
