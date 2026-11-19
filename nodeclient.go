@@ -156,7 +156,7 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	// restarts so the node_id carried on bridged Mastodon users keeps resolving
 	// back to this gateway (a rotating id would orphan them). Same derivation as
 	// a Warpnet member node (security.GenerateKeyFromSeed).
-	priv, err := security.GenerateKeyFromSeed([]byte(defaultGatewaySeed))
+	priv, err := security.GenerateKeyFromSeed([]byte(gatewaySeed()))
 	if err != nil {
 		return nil, fmt.Errorf("nodeclient: identity: %w", err)
 	}

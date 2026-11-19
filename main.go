@@ -73,7 +73,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.116"
+const gatewayVersion = "0.1.117"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -126,6 +126,9 @@ func main() {
 	// so multiNode locates each user on the network that has them.
 	var src fediverse.WarpnetSource = fediverse.StaticSource{} // empty fallback when no network is reachable
 	var nodes *multiNode
+	if os.Getenv("GATEWAY_P2P_SEED") == "" {
+		log.Warnf("gateway: GATEWAY_P2P_SEED is unset; running under the public legacy identity, which nodes trust with nothing secret")
+	}
 	clients := connectNetworks(appCtx)
 	if len(clients) == 0 {
 		log.Warnln("gateway: no Warpnet network reachable; serving the static profile only")
@@ -155,15 +158,15 @@ func main() {
 	var hub *nostrHub
 	if os.Getenv("GATEWAY_DISABLE_NOSTR") == "" {
 		hub = &nostrHub{g: g, relays: nostr.NewRelayPool(netguard.NewClient(0))}
-		keys, kerr := nostr.KeysFromEnv(defaultGatewaySeed)
-		if kerr != nil {
-			log.Warnf("gateway: %v; Nostr keys are off", kerr)
+		keys := nodeKeys{}
+		for _, c := range clients {
+			keys[c.network] = c
 		}
-		hub.keys = keys
+		hub.keys = nostr.NewKeys(keys)
 		// Writing to Nostr waits for the node-facing sender check; until it is
 		// in, GATEWAY_NOSTR_PUBLISH stays off.
-		hub.publish = keys != nil && os.Getenv("GATEWAY_NOSTR_PUBLISH") == "true"
-		log.Infof("gateway: Nostr keys %v, publishing to Nostr %v", keys != nil, hub.publish)
+		hub.publish = os.Getenv("GATEWAY_NOSTR_PUBLISH") == "true"
+		log.Infof("gateway: publishing to Nostr %v", hub.publish)
 		nb := nostr.NewBridge(hub.relays, nostr.RelaysFromEnv(), "", host)
 		hub.live = nostr.NewLive(nb, hub.push)
 		nb.Trusted = hub.live.Trusted

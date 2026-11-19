@@ -27,18 +27,14 @@ resulting from the use or misuse of this software.
 
 package nostr
 
-// Custodial Nostr keys of Warpnet users, computed on the fly from one
-// gateway secret and never stored: sk = HMAC-SHA256(master,
-// "warpnet/nostr/v1\x00" + network + "\x00" + ULID), retried with a counter
-// while it is not a valid secp256k1 scalar.
+// Nostr keys of Warpnet users. Each user's node derives the key from its own
+// identity and hands it to the gateway on request; the gateway signs with it
+// and never stores it. Only public keys are remembered.
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"errors"
-	"os"
-	"strconv"
+	"crypto/subtle"
 	"strings"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -46,74 +42,66 @@ import (
 )
 
 const (
-	nostrKeyDomain = "warpnet/nostr/v1"
-	// nostrSecretMinLen keeps a guessable master out: every key follows from it.
-	nostrSecretMinLen = 32
-	nostrOwnedKeys    = 1 << 16
+	nostrOwnedKeys = 1 << 16
+	nostrPubKeyTTL = time.Hour
 )
 
-var errWeakNostrSecret = errors.New("nostr: GATEWAY_NOSTR_SECRET must be at least 32 bytes and not a public value")
+// KeySource asks a user's home node for their Nostr secret key.
+type KeySource interface {
+	NostrKey(network, userID string) ([32]byte, bool)
+}
 
 type Keys struct {
-	master []byte
-	// owned maps a derived pubkey back to the Warpnet account it belongs to,
-	// so the gateway's own keys resolve to native accounts, not Nostr copies.
+	source KeySource
+	// owned maps a user's pubkey back to the Warpnet account it belongs to,
+	// so the gateway's own users resolve to native accounts, not Nostr copies.
 	owned *expirable.LRU[string, ownedKey]
+	pubs  *expirable.LRU[string, string]
 }
 
 type ownedKey struct{ network, userID string }
 
-// KeysFromEnv reads the master secret from GATEWAY_NOSTR_SECRET; nil
-// when it is unset. The value is never logged.
-// forbidden is a public value the secret must not equal.
-func KeysFromEnv(forbidden string) (*Keys, error) {
-	secret := os.Getenv("GATEWAY_NOSTR_SECRET")
-	if secret == "" {
-		return nil, nil //nolint:nilnil // unset: no keys, not an error
-	}
-	return NewKeys([]byte(secret), forbidden)
-}
-
-func NewKeys(master []byte, forbidden string) (*Keys, error) {
-	if len(master) < nostrSecretMinLen || string(master) == forbidden {
-		return nil, errWeakNostrSecret
-	}
+func NewKeys(source KeySource) *Keys {
 	return &Keys{
-		master: append([]byte{}, master...),
+		source: source,
 		owned:  expirable.NewLRU[string, ownedKey](nostrOwnedKeys, nil, 0),
-	}, nil
+		pubs:   expirable.NewLRU[string, string](nostrOwnedKeys, nil, nostrPubKeyTTL),
+	}
 }
 
-// secretKey derives a Warpnet user's key; only ULID accounts have one.
+// secretKey fetches a Warpnet user's key from their node; only ULID accounts
+// have one.
 func (k *Keys) secretKey(network, userID string) ([32]byte, bool) {
 	var sk [32]byte
-	if k == nil || network == "" {
+	if k == nil || k.source == nil || network == "" {
 		return sk, false
 	}
 	if _, err := ulid.ParseStrict(userID); err != nil {
 		return sk, false
 	}
 	userID = strings.ToUpper(userID)
-	msg := nostrKeyDomain + "\x00" + network + "\x00" + userID
-	for counter := 0; ; counter++ {
-		m := msg
-		if counter > 0 {
-			m += "\x00" + strconv.Itoa(counter)
-		}
-		mac := hmac.New(sha256.New, k.master)
-		mac.Write([]byte(m))
-		copy(sk[:], mac.Sum(nil))
-		var s btcec.ModNScalar
-		if overflow := s.SetByteSlice(sk[:]); !overflow && !s.IsZero() {
-			break
-		}
+	sk, ok := k.source.NostrKey(network, userID)
+	if !ok {
+		return sk, false
 	}
-	k.owned.Add(publicKeyHex(sk), ownedKey{network: network, userID: userID})
+	var s btcec.ModNScalar
+	if overflow := s.SetByteSlice(sk[:]); overflow || s.IsZero() {
+		return [32]byte{}, false
+	}
+	pk := publicKeyHex(sk)
+	k.owned.Add(pk, ownedKey{network: network, userID: userID})
+	k.pubs.Add(network+"\x00"+userID, pk)
 	return sk, true
 }
 
 // pubKey is a Warpnet user's Nostr public key.
 func (k *Keys) pubKey(network, userID string) (string, bool) {
+	if k == nil {
+		return "", false
+	}
+	if pk, ok := k.pubs.Get(network + "\x00" + strings.ToUpper(userID)); ok {
+		return pk, true
+	}
 	sk, ok := k.secretKey(network, userID)
 	if !ok {
 		return "", false
@@ -121,8 +109,8 @@ func (k *Keys) pubKey(network, userID string) (string, bool) {
 	return publicKeyHex(sk), true
 }
 
-// owner names the Warpnet account behind one of the gateway's own keys,
-// among the keys derived since start.
+// owner names the Warpnet account behind one of the users' keys seen since
+// start.
 func (k *Keys) owner(pk string) (ownedKey, bool) {
 	if k == nil {
 		return ownedKey{}, false
@@ -130,8 +118,8 @@ func (k *Keys) owner(pk string) (ownedKey, bool) {
 	return k.owned.Get(pk)
 }
 
-// isOwn checks a claim that pk belongs to userID by deriving it again.
+// isOwn checks a claim that pk belongs to userID against the user's node.
 func (k *Keys) isOwn(pk, network, userID string) bool {
-	derived, ok := k.pubKey(network, userID)
-	return ok && hmac.Equal([]byte(derived), []byte(pk))
+	known, ok := k.pubKey(network, userID)
+	return ok && subtle.ConstantTimeCompare([]byte(known), []byte(pk)) == 1
 }

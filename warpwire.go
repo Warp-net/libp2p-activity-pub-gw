@@ -33,6 +33,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
@@ -51,11 +52,20 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-// defaultGatewaySeed derives the gateway's stable libp2p identity (warpnet pins
-// the resulting peer id as mastodon.GatewayNodeID, so it is not configurable).
-// The same identity is used on every network: they are PSK-isolated, so the peer
-// id can (and must) be the one warpnet expects on each of them.
+// defaultGatewaySeed is the legacy, public identity seed: anyone can claim
+// its peer id, so nodes trust nothing secret to it. Production sets
+// GATEWAY_P2P_SEED, whose peer id warpnet pins as fediverse.GatewayNodeID.
+// The same identity is used on every network: they are PSK-isolated, so the
+// peer id can (and must) be the one warpnet expects on each of them.
 const defaultGatewaySeed = "warpnet-activitypub-gateway"
+
+// gatewaySeed is the gateway's libp2p identity seed. It is never logged.
+func gatewaySeed() string {
+	if seed := os.Getenv("GATEWAY_P2P_SEED"); seed != "" {
+		return seed
+	}
+	return defaultGatewaySeed
+}
 
 // p2pListenByNetwork is each network's libp2p listen address. The gateway joins
 // every configured network in one process, so each node needs its own port. They

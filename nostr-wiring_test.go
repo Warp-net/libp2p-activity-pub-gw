@@ -29,7 +29,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,11 +115,59 @@ func testHub(g *fediverse.Gateway, relays []string) *nostrHub {
 	return hub
 }
 
+// fixedNodeKeys hands every user the same key, standing in for their nodes.
+type fixedNodeKeys struct{}
+
+func (fixedNodeKeys) NostrKey(string, string) ([32]byte, bool) {
+	return sha256.Sum256([]byte("node key")), true
+}
+
 func testKeys(t *testing.T) *nostr.Keys {
 	t.Helper()
-	k, err := nostr.NewKeys([]byte("0123456789abcdef0123456789abcdef-test"), defaultGatewaySeed)
-	if err != nil {
-		t.Fatal(err)
+	return nostr.NewKeys(fixedNodeKeys{})
+}
+
+// keyNode is a user's node answering the gateway's key request.
+type keyNode struct {
+	owner peer.ID
+	asked []peer.ID
+	resp  string
+}
+
+func (k *keyNode) stream(_ context.Context, p peer.ID, route string, _ any) ([]byte, error) {
+	k.asked = append(k.asked, p)
+	if route != warp.RouteGetNostrKey {
+		return []byte(`{}`), nil
 	}
-	return k
+	return []byte(k.resp), nil
+}
+
+func TestNostrKeyIsAskedOfTheOwnersNode(t *testing.T) {
+	const user = "01KZS1PJ7ZCYGZ1AGARA8B2G9N"
+	c := newTestNode(t, "nostr-key-"+t.Name())
+	node := &keyNode{owner: newTestNode(t, "nostr-key-owner").h.ID()}
+	c.owner.Add(user, node.owner)
+	c.stream = node.stream
+
+	key := strings.Repeat("ab", 32)
+	node.resp = `{"user_id":"` + user + `","key":"` + key + `"}`
+	sk, ok := c.NostrKey(user)
+	if !ok || hex.EncodeToString(sk[:]) != key {
+		t.Fatalf("key = %x, %v", sk, ok)
+	}
+	if len(node.asked) != 1 || node.asked[0] != node.owner {
+		t.Fatalf("asked %v; only the owner's node may be asked", node.asked)
+	}
+
+	for _, bad := range []string{
+		`{"user_id":"01KSGHBHKG0N77T6A3RZV8W050","key":"` + key + `"}`,
+		`{"user_id":"` + user + `","key":"zz"}`,
+		`{"user_id":"` + user + `","key":"abcd"}`,
+		`{"code":1,"message":"nostr key: the owner did not allow Nostr"}`,
+	} {
+		node.resp = bad
+		if _, ok := c.NostrKey(user); ok {
+			t.Errorf("answer %s must not give a key", bad)
+		}
+	}
 }

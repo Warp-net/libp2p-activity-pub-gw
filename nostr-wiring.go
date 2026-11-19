@@ -29,6 +29,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -109,6 +110,37 @@ func (c *nodeClient) HomeUser(userID string) (warp.User, bool) {
 		return warp.User{}, false
 	}
 	return u, true
+}
+
+// NostrKey asks userID's own node for their Nostr secret key. The node answers
+// only this gateway and only with consent; the key is used and dropped.
+func (c *nodeClient) NostrKey(userID string) ([32]byte, bool) {
+	var sk [32]byte
+	bt, _, ok := c.askOwner(userID, warp.RouteGetNostrKey, warp.GetNostrKeyEvent{UserId: userID})
+	if !ok {
+		return sk, false
+	}
+	var resp warp.GetNostrKeyResponse
+	if json.Unmarshal(bt, &resp) != nil || !strings.EqualFold(resp.UserId, userID) {
+		return sk, false
+	}
+	raw, err := hex.DecodeString(resp.Key)
+	if err != nil || len(raw) != len(sk) {
+		return sk, false
+	}
+	copy(sk[:], raw)
+	return sk, true
+}
+
+// nodeKeys fetches users' Nostr keys through the client of their network.
+type nodeKeys map[string]*nodeClient
+
+func (n nodeKeys) NostrKey(network, userID string) ([32]byte, bool) {
+	c := n[network]
+	if c == nil {
+		return [32]byte{}, false
+	}
+	return c.NostrKey(userID)
 }
 
 // askOwner sends a route to the node that owns userID only, never falling
