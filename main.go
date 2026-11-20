@@ -73,7 +73,14 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.119"
+const gatewayVersion = "0.1.121"
+
+// Developer's switches, not deployment config: nostrEnabled runs the Nostr
+// bridge, nostrPublish writes consenting users' content to Nostr.
+const (
+	nostrEnabled = true
+	nostrPublish = true
+)
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -153,16 +160,14 @@ func main() {
 	}
 
 	var hub *nostrHub
-	if os.Getenv("GATEWAY_DISABLE_NOSTR") == "" {
+	if nostrEnabled {
 		hub = &nostrHub{g: g, relays: nostr.NewRelayPool(netguard.NewClient(0))}
 		keys := nodeKeys{}
 		for _, c := range clients {
 			keys[c.network] = c
 		}
 		hub.keys = nostr.NewKeys(keys)
-		// Writing to Nostr waits for the node-facing sender check; until it is
-		// in, GATEWAY_NOSTR_PUBLISH stays off.
-		hub.publish = os.Getenv("GATEWAY_NOSTR_PUBLISH") == "true"
+		hub.publish = nostrPublish
 		log.Infof("gateway: publishing to Nostr %v", hub.publish)
 		nb := nostr.NewBridge(hub.relays, nostr.RelaysFromEnv(), "", host)
 		hub.live = nostr.NewLive(nb, hub.push)
