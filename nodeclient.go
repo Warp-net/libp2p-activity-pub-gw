@@ -71,6 +71,11 @@ var (
 const (
 	ownerCacheSize = 1024
 	ownerCacheTTL  = 10 * time.Minute
+
+	// A node's bridge key is kept while it keeps writing to the gateway
+	// (its periodic info requests renew it), and forgotten soon after.
+	bridgeKeySize = 32
+	bridgeKeyTTL  = time.Hour
 )
 
 // Request timing. A route request used to share a single 1-minute budget across
@@ -112,6 +117,8 @@ type nodeClient struct {
 	mu    sync.Mutex
 	good  []peer.ID                       // member nodes known to answer data routes; tried first
 	owner *expirable.LRU[string, peer.ID] // userID -> its home node (domain.User.NodeId); user-scoped routes target it
+	// bridgeKeys holds, in memory only, the bridge key each node last sent.
+	bridgeKeys *expirable.LRU[peer.ID, []byte]
 
 	throttled *expirable.LRU[string, struct{}]
 	users     *expirable.LRU[string, fediverse.WarpnetUser]
@@ -142,7 +149,7 @@ func networkEntries(network string) ([]peer.AddrInfo, error) {
 // network through its entry peers. One process calls it once per network in
 // NODE_NETWORK (see connectNetworks), so everything it builds — host, DHT,
 // listen port — is per network.
-func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
+func connectNetwork(ctx context.Context, network, seed string) (*nodeClient, error) {
 	entries, err := networkEntries(network)
 	if err != nil {
 		return nil, err
@@ -156,7 +163,7 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 	// restarts so the node_id carried on bridged Mastodon users keeps resolving
 	// back to this gateway (a rotating id would orphan them). Same derivation as
 	// a Warpnet member node (security.GenerateKeyFromSeed).
-	priv, err := security.GenerateKeyFromSeed([]byte(defaultGatewaySeed))
+	priv, err := security.GenerateKeyFromSeed([]byte(seed))
 	if err != nil {
 		return nil, fmt.Errorf("nodeclient: identity: %w", err)
 	}
@@ -251,9 +258,10 @@ func connectNetwork(ctx context.Context, network string) (*nodeClient, error) {
 
 	c := &nodeClient{
 		h: h, priv: priv, dht: kdht, network: network, relays: relays,
-		owner:     expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
-		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
-		users:     expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
+		owner:      expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
+		bridgeKeys: expirable.NewLRU[peer.ID, []byte](ownerCacheSize, nil, bridgeKeyTTL),
+		throttled:  expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
+		users:      expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
 	}
 	c.stream = c.streamToMember
 	return c, nil

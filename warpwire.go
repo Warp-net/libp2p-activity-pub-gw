@@ -32,6 +32,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -51,11 +55,19 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-// defaultGatewaySeed derives the gateway's stable libp2p identity (warpnet pins
-// the resulting peer id as mastodon.GatewayNodeID, so it is not configurable).
-// The same identity is used on every network: they are PSK-isolated, so the peer
-// id can (and must) be the one warpnet expects on each of them.
+// defaultGatewaySeed is the legacy, public identity seed, kept for tests:
+// anyone can claim its peer id.
 const defaultGatewaySeed = "warpnet-activitypub-gateway"
+
+const p2pSeedDomain = "warpnet/gateway/p2p/v1"
+
+// identitySeed derives the gateway's libp2p identity from its secret signing
+// key, so every gateway has its own stable peer id with nothing to configure.
+// The same identity is used on every network: they are PSK-isolated.
+func identitySeed(key *rsa.PrivateKey) string {
+	sum := sha256.Sum256(append([]byte(p2pSeedDomain), x509.MarshalPKCS1PrivateKey(key)...))
+	return hex.EncodeToString(sum[:])
+}
 
 // p2pListenByNetwork is each network's libp2p listen address. The gateway joins
 // every configured network in one process, so each node needs its own port. They

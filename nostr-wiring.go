@@ -29,6 +29,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -36,6 +37,7 @@ import (
 	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
 	"github.com/Warp-net/activity-pub-gw/internal/nostr"
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // nostrHub wires the Nostr bridge into the gateway: one relay pool and live
@@ -109,6 +111,39 @@ func (c *nodeClient) HomeUser(userID string) (warp.User, bool) {
 		return warp.User{}, false
 	}
 	return u, true
+}
+
+// rememberBridgeKey keeps the bridge key a node sent in memory only, under
+// the peer that sent it.
+func (c *nodeClient) rememberBridgeKey(from peer.ID, hexKey string) {
+	if hexKey == "" {
+		return
+	}
+	key, err := hex.DecodeString(hexKey)
+	if err != nil || len(key) != bridgeKeySize {
+		return
+	}
+	c.bridgeKeys.Add(from, key)
+}
+
+// BridgeKey is the key userID's own node last sent, if it is still fresh.
+func (c *nodeClient) BridgeKey(userID string) ([]byte, bool) {
+	owner, ok := c.ownerNode(userID)
+	if !ok {
+		return nil, false
+	}
+	return c.bridgeKeys.Get(owner)
+}
+
+// nodeKeys reads users' bridge keys through the client of their network.
+type nodeKeys map[string]*nodeClient
+
+func (n nodeKeys) BridgeKey(network, userID string) ([]byte, bool) {
+	c := n[network]
+	if c == nil {
+		return nil, false
+	}
+	return c.BridgeKey(userID)
 }
 
 // askOwner sends a route to the node that owns userID only, never falling

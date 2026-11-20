@@ -28,6 +28,7 @@ resulting from the use or misuse of this software.
 package nostr
 
 import (
+	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
@@ -67,13 +68,18 @@ func consenting(id string) warp.User {
 	return warp.User{Id: id, Metadata: map[string]string{nostrConsentKey: nostrConsentAllow}}
 }
 
+// fakeNodeKeys stands in for users' nodes sending their bridge keys: one per
+// network and user, from a test secret.
+type fakeNodeKeys struct{ secret string }
+
+func (f fakeNodeKeys) BridgeKey(network, userID string) ([]byte, bool) {
+	sum := sha256.Sum256([]byte(f.secret + "\x00" + network + "\x00" + strings.ToUpper(userID)))
+	return sum[:], true
+}
+
 func testKeys(t *testing.T) *Keys {
 	t.Helper()
-	k, err := NewKeys([]byte(testSecret), testPublicSeed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
+	return NewKeys(fakeNodeKeys{testSecret})
 }
 
 type publishFixture struct {
@@ -143,9 +149,9 @@ func TestNostrKeyDerivation(t *testing.T) {
 	if !ok || a1 != a2 || a1 == aTest || a1 == b || !hex64.MatchString(a1) {
 		t.Fatalf("keys: %q %q %q %q", a1, a2, aTest, b)
 	}
-	other, _ := NewKeys([]byte(testSecret+"-other"), testPublicSeed)
+	other := NewKeys(fakeNodeKeys{testSecret + "-other"})
 	if o, _ := other.pubKey("warpnet", aliceULID); o == a1 {
-		t.Fatal("another master must give another key")
+		t.Fatal("another node must give another key")
 	}
 	if _, ok := k.pubKey("warpnet", "bob@mastodon.social"); ok {
 		t.Fatal("only ULID accounts have keys")
@@ -164,10 +170,8 @@ func TestNostrKeyDerivation(t *testing.T) {
 	if _, ok := parseSignedEvent(eventJSON(signed)); !ok {
 		t.Fatal("a derived key must produce a valid BIP-340 signature")
 	}
-	for _, weak := range []string{"short", testPublicSeed} {
-		if _, err := NewKeys([]byte(weak), testPublicSeed); err == nil {
-			t.Errorf("secret %q must be refused", weak)
-		}
+	if _, ok := NewKeys(nil).pubKey("warpnet", aliceULID); ok {
+		t.Fatal("no node to ask, no key")
 	}
 }
 
@@ -344,9 +348,6 @@ func TestNostrOwnKeysResolveToNativeAccounts(t *testing.T) {
 		t.Fatalf("followings = %v, want the native id", fl.Followings)
 	}
 }
-
-// testPublicSeed stands in for the gateway's public libp2p seed.
-const testPublicSeed = "public-seed-0123456789abcdef0123456789"
 
 // testLinks mirrors the gateway's url scheme on gw.example.
 type testLinks struct{}

@@ -49,7 +49,7 @@ func TestNetworkEntries(t *testing.T) {
 // connectNetwork must fail fast (rather than build a host) when asked for a
 // network with no bootstrap relays.
 func TestConnectNetworkRejectsAnUnknownNetwork(t *testing.T) {
-	if _, err := connectNetwork(context.Background(), "definitely-not-a-warpnet"); !errors.Is(err, errNoEntryPeers) {
+	if _, err := connectNetwork(context.Background(), "definitely-not-a-warpnet", defaultGatewaySeed); !errors.Is(err, errNoEntryPeers) {
 		t.Fatalf("err = %v, want errNoEntryPeers", err)
 	}
 }

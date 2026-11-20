@@ -279,6 +279,10 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 				warp.NetLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
 				return
 			}
+			var be warp.BridgeEnvelope
+			if wjson.Unmarshal(data, &be) == nil {
+				c.rememberBridgeKey(conn.RemotePeer(), be.BridgeKey)
+			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), apRequestTimeout)

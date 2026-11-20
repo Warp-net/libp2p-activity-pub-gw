@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
 	"testing"
 	"time"
 
@@ -116,5 +118,23 @@ func TestStreamSendReportsAnUndialablePeer(t *testing.T) {
 	other := newTestNode(t, "never-connected")
 	if _, err := streamSend(ctx, c.h, other.h.ID(), c.priv, "/route", nil); err == nil {
 		t.Fatal("expected a dial error for a peer with no known addresses")
+	}
+}
+
+func TestIdentitySeedFollowsTheSigningKey(t *testing.T) {
+	a, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := identitySeed(a)
+	if again := identitySeed(a); again != seed {
+		t.Fatal("one signing key must give one identity")
+	}
+	if seed == identitySeed(b) || seed == defaultGatewaySeed {
+		t.Fatal("every gateway must get its own identity")
 	}
 }

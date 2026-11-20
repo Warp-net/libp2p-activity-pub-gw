@@ -81,6 +81,12 @@ type (
 // Request/response event payloads (warpnet's own types). GetAllTweetsEvent and
 // GetTweetEvent now carry root_id/parent_id themselves, so the thread ids the
 // gateway needs no longer have to be decoded into local shadow structs.
+// BridgeEnvelope is the part of a node's message envelope only the gateway
+// gets: the hex key it acts with for the sender on bridged networks.
+type BridgeEnvelope struct {
+	BridgeKey string `json:"bridge_key"`
+}
+
 type (
 	GetUserEvent       = event.GetUserEvent
 	GetAllUsersEvent   = event.GetAllUsersEvent
