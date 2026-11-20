@@ -88,9 +88,10 @@ func TestWhoToFollowDirectoryFailureAndLimits(t *testing.T) {
 	if _, err := b.GetWhoToFollow(context.Background(), warp.GetAllUsersEvent{Limit: &limit}); err == nil {
 		t.Fatal("expected remote error")
 	}
-	for _, cursor := range []string{"https://evil.example", "directory:-1", "directory:18446744073709551615"} {
-		if _, err := b.GetWhoToFollow(context.Background(), warp.GetAllUsersEvent{Cursor: &cursor}); err == nil {
-			t.Fatalf("accepted invalid cursor %q", cursor)
+	for _, cursor := range []string{"https://evil.example", "directory:-1", "directory:18446744073709551615", "01M3J6Y3V6YX180AP0PMZ6B3D4"} {
+		resp, err := b.GetWhoToFollow(context.Background(), warp.GetAllUsersEvent{Cursor: &cursor})
+		if err != nil || len(resp.Users) != 0 || resp.Cursor != "end" {
+			t.Fatalf("foreign cursor %q = %+v, %v; want the end of the list", cursor, resp, err)
 		}
 	}
 	t.Setenv("GATEWAY_DISCOVERY_HOST", "")

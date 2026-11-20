@@ -34,6 +34,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
+	"github.com/Warp-net/activity-pub-gw/internal/nostr"
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
 	"github.com/Warp-net/warpnet/core/warpnet"
 	"github.com/Warp-net/warpnet/event"
@@ -73,7 +74,7 @@ func (c *nodeClient) serveRoutes(g *fediverse.Gateway, hub *nostrHub, ownerHandl
 	handlers := map[string]routeHandler{
 		event.PUBLIC_GET_INFO: c.infoHandler(ownerHandle),
 		event.PUBLIC_GET_WHOTOFOLLOW: wrapJSON(func(ctx context.Context, ev warp.GetAllUsersEvent) (any, error) {
-			return b.GetWhoToFollow(ctx, ev)
+			return whoToFollow(ctx, b, nb, ev)
 		}),
 
 		warp.RouteGetUser: wrapJSON(func(ctx context.Context, ev warp.GetUserEvent) (any, error) {
@@ -84,7 +85,7 @@ func (c *nodeClient) serveRoutes(g *fediverse.Gateway, hub *nostrHub, ownerHandl
 		}),
 		warp.RouteGetUsers: wrapJSON(func(ctx context.Context, ev warp.GetAllUsersEvent) (any, error) {
 			if string(ev.UserId) == ownerHandle {
-				return b.GetWhoToFollow(ctx, ev)
+				return whoToFollow(ctx, b, nb, ev)
 			}
 			getBrief := b.GetUserBrief
 			if nb.Serves(string(ev.UserId)) {
@@ -248,6 +249,16 @@ func (c *nodeClient) serveRoutes(g *fediverse.Gateway, hub *nostrHub, ownerHandl
 		c.h.SetStreamHandler(protocol.ID(route), c.streamHandler(route, h))
 	}
 	warp.NetLog(c.network).Infof("nodeserver: serving %d public routes as %s (owner %s)", len(handlers), c.h.ID(), ownerHandle)
+}
+
+// whoToFollow suggests Mastodon accounts and, on the first page, Nostr ones.
+func whoToFollow(ctx context.Context, b *fediverse.MastodonBridge, nb *nostr.Bridge, ev warp.GetAllUsersEvent) (warp.UsersResponse, error) {
+	resp, err := b.GetWhoToFollow(ctx, ev)
+	if nb == nil || (ev.Cursor != nil && *ev.Cursor != "") {
+		return resp, err
+	}
+	resp.Users = append(nb.WhoToFollow(ctx), resp.Users...)
+	return resp, nil
 }
 
 // streamHandler reads the signed request envelope, verifies it against the
