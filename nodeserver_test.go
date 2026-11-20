@@ -693,3 +693,15 @@ func newRouterTestGateway(t *testing.T, cfg fediverse.Config) *fediverse.Gateway
 	}
 	return g
 }
+
+func TestNodeServerRemembersCallingMembers(t *testing.T) {
+	fx := newNodeFixture(t)
+	if got := fx.server.memberCandidates(warp.RouteGetUsers); len(got) != 0 {
+		t.Fatalf("candidates = %v before any call", got)
+	}
+	fx.call(t, event.PUBLIC_GET_INFO, nil, nil)
+	got := fx.server.memberCandidates(warp.RouteGetUsers)
+	if len(got) != 1 || got[0] != fx.client.h.ID() {
+		t.Fatalf("candidates = %v; a node that called must be asked back", got)
+	}
+}
