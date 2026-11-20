@@ -354,3 +354,28 @@ func TestNostrFetchDoesNotWaitForAStalledRelay(t *testing.T) {
 		t.Fatal("a relay cut off by the grace period must not be marked down")
 	}
 }
+
+func TestNostrWhoToFollowEntersTheFollowGraph(t *testing.T) {
+	relay := nostrtest.NewRelay(t)
+	entry, bob, carol, silent := nostrtest.NewKey(), nostrtest.NewKey(), nostrtest.NewKey(), nostrtest.NewKey()
+	now := time.Now().Unix()
+	relay.Add(
+		entry.Sign(t, KindProfile, `{"name":"entry"}`, now),
+		bob.Sign(t, KindProfile, `{"name":"bob"}`, now),
+		carol.Sign(t, KindProfile, `{"name":"carol"}`, now),
+		entry.Sign(t, kindFollowList, "", now, []string{"p", bob.PK}, []string{"p", carol.PK}, []string{"p", silent.PK}),
+	)
+	b := testNostrBridge(t, relay)
+	b.entry = entry.PK
+
+	got := map[string]bool{}
+	for _, u := range b.WhoToFollow(testCtx(t)) {
+		if u.Network != warp.NostrNetwork {
+			t.Fatalf("suggested %+v, want a Nostr account", u)
+		}
+		got[u.Id] = true
+	}
+	if len(got) != 3 || !got[Handle(entry.PK)] || !got[Handle(bob.PK)] || !got[Handle(carol.PK)] {
+		t.Fatalf("suggestions = %v, want the entry and the accounts it follows with a profile", got)
+	}
+}

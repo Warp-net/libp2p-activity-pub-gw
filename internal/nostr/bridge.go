@@ -82,6 +82,11 @@ const (
 	nostrMaxPage       = 50
 	nostrBoundedFetch  = 500
 	nostrMaxFollowList = 1000
+	// nostrSuggestions caps the Nostr accounts suggested to Warpnet.
+	nostrSuggestions = 20
+	// nostrEntryPubKey (fiatjaf) is where Warpnet enters the Nostr follow
+	// graph; a developer's choice, like the Mastodon entry account.
+	nostrEntryPubKey = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
 )
 
 type Bridge struct {
@@ -105,11 +110,13 @@ type Bridge struct {
 	relayLists *expirable.LRU[string, []string]
 	follows    *expirable.LRU[string, []string]
 	authors    *expirable.LRU[string, string] // event id -> author pubkey
+	// entry is the account suggestions start from.
+	entry string
 }
 
 func NewBridge(relays Relays, defaults []string, nodeID, selfHost string) *Bridge {
 	return &Bridge{
-		relays: relays, defaults: defaults, nodeID: nodeID, selfHost: selfHost,
+		relays: relays, defaults: defaults, nodeID: nodeID, selfHost: selfHost, entry: nostrEntryPubKey,
 		profiles:   expirable.NewLRU[string, nostrEvent](nostrCacheSize, nil, nostrProfileTTL),
 		relayLists: expirable.NewLRU[string, []string](nostrCacheSize, nil, nostrRelayListTTL),
 		follows:    expirable.NewLRU[string, []string](nostrCacheSize, nil, nostrProfileTTL),
@@ -160,24 +167,13 @@ func (b *Bridge) profile(ctx context.Context, pk string) (nostrEvent, bool) {
 // names fills the display names of the authors of ts from their profiles,
 // fetching the missing ones in one request.
 func (b *Bridge) names(ctx context.Context, ts []warp.Tweet) {
-	var missing []string
+	pks := make([]string, 0, len(ts))
 	for _, t := range ts {
-		if pk, ok := nostrPubKey(t.UserId); ok && !b.profiles.Contains(pk) {
-			missing = append(missing, pk)
+		if pk, ok := nostrPubKey(t.UserId); ok {
+			pks = append(pks, pk)
 		}
 	}
-	if missing = dedupeStrings(missing); len(missing) > 0 {
-		evs := b.relays.fetch(ctx, b.defaults, nostrFilter{Kinds: []int{KindProfile}, Authors: missing, Limit: len(missing)})
-		got := map[string]nostrEvent{}
-		for _, ev := range evs {
-			if _, seen := got[ev.PubKey]; !seen {
-				got[ev.PubKey] = ev
-			}
-		}
-		for _, pk := range missing {
-			b.profiles.Add(pk, got[pk])
-		}
-	}
+	b.prefetchProfiles(ctx, pks)
 	for i := range ts {
 		pk, _ := nostrPubKey(ts[i].UserId)
 		if p, ok := b.profiles.Get(pk); ok && p.ID != "" {
@@ -186,6 +182,46 @@ func (b *Bridge) names(ctx context.Context, ts []warp.Tweet) {
 			}
 		}
 	}
+}
+
+// prefetchProfiles caches the profiles of pks not cached yet, in one request.
+func (b *Bridge) prefetchProfiles(ctx context.Context, pks []string) {
+	var missing []string
+	for _, pk := range pks {
+		if !b.profiles.Contains(pk) {
+			missing = append(missing, pk)
+		}
+	}
+	if missing = dedupeStrings(missing); len(missing) == 0 {
+		return
+	}
+	evs := b.relays.fetch(ctx, b.defaults, nostrFilter{Kinds: []int{KindProfile}, Authors: missing, Limit: len(missing)})
+	got := map[string]nostrEvent{}
+	for _, ev := range evs {
+		if _, seen := got[ev.PubKey]; !seen {
+			got[ev.PubKey] = ev
+		}
+	}
+	for _, pk := range missing {
+		b.profiles.Add(pk, got[pk])
+	}
+}
+
+// WhoToFollow suggests Nostr accounts to Warpnet: the entry account and the
+// accounts it follows, a way into the Nostr follow graph.
+func (b *Bridge) WhoToFollow(ctx context.Context) []warp.User {
+	pks := dedupeStrings(append([]string{b.entry}, b.followList(ctx, b.entry)...))
+	if len(pks) > nostrSuggestions {
+		pks = pks[:nostrSuggestions]
+	}
+	b.prefetchProfiles(ctx, pks)
+	out := make([]warp.User, 0, len(pks))
+	for _, pk := range pks {
+		if u, err := b.getUser(ctx, Handle(pk), false); err == nil {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 func (b *Bridge) GetUser(ctx context.Context, handle string) (warp.User, error) {

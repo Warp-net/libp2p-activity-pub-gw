@@ -5,7 +5,6 @@ package fediverse
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 	"os"
 	"strconv"
@@ -42,7 +41,7 @@ func (b *MastodonBridge) GetWhoToFollow(ctx context.Context, ev warp.GetAllUsers
 		var err error
 		offset, err = strconv.ParseUint(raw, 10, 64)
 		if !ok || err != nil || offset > ^uint64(0)-limit {
-			return resp, fmt.Errorf("directory: invalid cursor")
+			return resp, nil // a cursor of the node's own list: nothing more here
 		}
 	}
 	u := url.URL{Scheme: "https", Host: host, Path: "/api/v1/directory"}
