@@ -46,6 +46,7 @@ import (
 const (
 	nostrOutboundScanInterval = 30 * time.Minute
 	nostrPostPollInterval     = time.Minute
+	nostrScanRetry            = time.Minute
 	// nostrProfileEvery polls pass between profile checks.
 	nostrProfileEvery = 30
 	nostrSeenSize     = 8192
@@ -57,33 +58,41 @@ type nostrOutbound struct {
 	req warp.Requester
 	pub *Publisher
 
+	retry time.Duration
+
 	mu      sync.Mutex
 	started map[string]bool
 }
 
 func NewOutbound(ctx context.Context, req warp.Requester, pub *Publisher) *nostrOutbound {
-	return &nostrOutbound{ctx: ctx, req: req, pub: pub, started: map[string]bool{}}
+	return &nostrOutbound{ctx: ctx, req: req, pub: pub, retry: nostrScanRetry, started: map[string]bool{}}
 }
 
 func (o *nostrOutbound) RunScanner(scanUser string) {
 	for {
-		o.scan(scanUser)
+		wait := nostrOutboundScanInterval
+		if !o.scan(scanUser) {
+			wait = o.retry // the network is not reachable yet
+		}
 		select {
 		case <-o.ctx.Done():
 			return
-		case <-time.After(nostrOutboundScanInterval):
+		case <-time.After(wait):
 		}
 	}
 }
 
 // scan starts a poller for every consenting user; consent cannot be revoked,
 // so a poller is never stopped (it skips while an account is locked).
-func (o *nostrOutbound) scan(scanUser string) {
-	for _, u := range warp.NativeUsers(o.req, scanUser) {
+// scan reports whether the network listed any user at all.
+func (o *nostrOutbound) scan(scanUser string) bool {
+	users := warp.NativeUsers(o.req, scanUser)
+	for _, u := range users {
 		if o.pub.consents(u.Id) {
 			o.start(u.Id)
 		}
 	}
+	return len(users) > 0
 }
 
 func (o *nostrOutbound) start(owner string) {
