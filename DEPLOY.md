@@ -1,4 +1,4 @@
-# Deploying the fediverse-gateway
+# Deploying the bridge-gateway
 
 A step-by-step runbook for putting one Warpnet user on the Fediverse, fronted by
 **Tailscale Funnel** (public HTTPS with no domain and no certificate management).
@@ -102,7 +102,7 @@ the static profile only.
 module root):
 
 ```sh
-docker build -f Dockerfile.gateway -t warpnet-gateway .
+docker build -f Dockerfile.bridge-gateway -t bridge-gateway .
 ```
 
 **C2. Run it:**
@@ -110,7 +110,7 @@ docker build -f Dockerfile.gateway -t warpnet-gateway .
 ```sh
 docker run -d --name warpnet-gw -v warpnet-gw-data:/data \
   -e TS_AUTHKEY=tskey-auth-xxxxxxxx \      # from A4
-  warpnet-gateway
+  bridge-gateway
 ```
 
 The gateway joins Warpnet through the network's bootstrap nodes on its own — no
@@ -138,9 +138,9 @@ docker logs -f warpnet-gw
 Look for:
 
 ```
-gateway: tailscale funnel node up as warpnet-gw.tailXXXX.ts.net
-gateway: joined Warpnet; any user is resolvable via the network
-gateway: serving public https://warpnet-gw.tailXXXX.ts.net via Tailscale Funnel
+bridge-gateway: tailscale funnel node up as warpnet-gw.tailXXXX.ts.net
+bridge-gateway: joined Warpnet; any user is resolvable via the network
+bridge-gateway: serving public https://warpnet-gw.tailXXXX.ts.net via Tailscale Funnel
 ```
 
 Any Warpnet user is reachable at `@<warpnet-user-id>@warpnet-gw.tailXXXX.ts.net`.

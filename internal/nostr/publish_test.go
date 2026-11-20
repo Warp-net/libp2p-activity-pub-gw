@@ -34,8 +34,8 @@ import (
 	"time"
 
 	"fiatjaf.com/nostr"
-	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/domain"
 )
 
@@ -83,7 +83,7 @@ func (f fakeNodeKeys) BridgeKey(network, userID string) ([]byte, bool) {
 
 func testKeys(t *testing.T) *Keys {
 	t.Helper()
-	return NewKeys(fakeNodeKeys{testSecret})
+	return newKeys(fakeNodeKeys{testSecret})
 }
 
 type publishFixture struct {
@@ -108,9 +108,9 @@ func newPublishFixture(t *testing.T) *publishFixture {
 	}, follows: map[string][]string{}}
 	keys := testKeys(t)
 	b := testNostrBridge(t, relay)
-	b.Keys, b.Links, b.Home, b.Network = keys, testLinks{}, home, warp.DefaultNetwork
-	pub := NewPublisher(keys, b, home, warp.DefaultNetwork, testLinks{})
-	b.Pub = pub
+	b.keys, b.links, b.home, b.network = keys, testLinks{}, home, warp.DefaultNetwork
+	pub := newPublisher(keys, b, home, warp.DefaultNetwork, testLinks{})
+	b.pub = pub
 	return &publishFixture{relay: relay, home: home, keys: keys, pub: pub, note: note, other: other}
 }
 
@@ -153,7 +153,7 @@ func TestNostrKeyDerivation(t *testing.T) {
 	if !ok || a1 != a2 || a1 == aTest || a1 == b || !hex64.MatchString(a1) {
 		t.Fatalf("keys: %q %q %q %q", a1, a2, aTest, b)
 	}
-	other := NewKeys(fakeNodeKeys{testSecret + "-other"})
+	other := newKeys(fakeNodeKeys{testSecret + "-other"})
 	if o, _ := other.pubKey("warpnet", aliceULID); o == a1 {
 		t.Fatal("another node must give another key")
 	}
@@ -174,7 +174,7 @@ func TestNostrKeyDerivation(t *testing.T) {
 	if _, ok := parseSignedEvent(eventJSON(signed)); !ok {
 		t.Fatal("a derived key must produce a valid BIP-340 signature")
 	}
-	if _, ok := NewKeys(nil).pubKey("warpnet", aliceULID); ok {
+	if _, ok := newKeys(nil).pubKey("warpnet", aliceULID); ok {
 		t.Fatal("no node to ask, no key")
 	}
 }
@@ -194,7 +194,7 @@ func TestNostrConsent(t *testing.T) {
 	if fx.pub.consents(aliceULID) {
 		t.Fatal("a locked account is never published")
 	}
-	testnet := NewPublisher(fx.keys, fx.pub.bridge, fx.home, "testnet", testLinks{})
+	testnet := newPublisher(fx.keys, fx.pub.bridge, fx.home, "testnet", testLinks{})
 	if testnet.consents(bobULID) {
 		t.Fatal("testnet stays off the public relays")
 	}
@@ -328,9 +328,9 @@ func TestNostrOwnKeysResolveToNativeAccounts(t *testing.T) {
 		t.Fatalf("own npub = %+v, %v; want the native account", u, err)
 	}
 
-	cold := NewBridge(testRelayPool(), b.defaults, "gw", "gw.example")
+	cold := newBridge(testRelayPool(), b.defaults, "gw", "gw.example")
 	coldKeys := testKeys(t)
-	cold.Keys, cold.Links, cold.Home, cold.Network = coldKeys, testLinks{}, fx.home, warp.DefaultNetwork
+	cold.keys, cold.links, cold.home, cold.network = coldKeys, testLinks{}, fx.home, warp.DefaultNetwork
 	sk, _ := coldKeys.secretKey(warp.DefaultNetwork, bobULID)
 	coldKeys.owned.Purge()
 	profile, _ := signEvent(sk, nostrEvent{Kind: KindProfile, Content: `{"name":"bob"}`, CreatedAt: time.Now().Unix(),

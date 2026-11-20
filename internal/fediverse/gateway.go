@@ -34,9 +34,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/logring"
-	"github.com/Warp-net/activity-pub-gw/internal/netguard"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/logring"
+	"github.com/Warp-net/bridge-gateway/internal/netguard"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/retrier"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )

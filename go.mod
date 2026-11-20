@@ -1,4 +1,4 @@
-module github.com/Warp-net/activity-pub-gw
+module github.com/Warp-net/bridge-gateway
 
 go 1.26.4
 

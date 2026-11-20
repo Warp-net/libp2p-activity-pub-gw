@@ -1,7 +1,7 @@
 // Copyright 2025 Vadim Filin
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package main
+package node
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -20,7 +20,7 @@ func TestTryMembersHedgesPastDeadPeer(t *testing.T) {
 	dead := peer.ID("dead-node")
 	good := peer.ID("good-node")
 
-	c := &nodeClient{}
+	c := &Node{}
 	c.stream = func(ctx context.Context, p peer.ID, route string, payload any) ([]byte, error) {
 		switch p {
 		case good:
@@ -50,15 +50,15 @@ func TestTryMembersHedgesPastDeadPeer(t *testing.T) {
 		t.Fatalf("tryMembers took %s; expected to hedge within ~%s", elapsed, hedgeDelay)
 	}
 	// The winning node should be remembered so later requests try it first.
-	if len(c.good) == 0 || c.good[0] != good {
-		t.Fatalf("tryMembers: winning peer not remembered: %v", c.good)
+	if len(c.members) == 0 || c.members[0] != good {
+		t.Fatalf("tryMembers: winning peer not remembered: %v", c.members)
 	}
 }
 
 // TestTryMembersAllFail returns an error (not a hang) when no candidate answers.
 func TestTryMembersAllFail(t *testing.T) {
 	boom := errors.New("boom")
-	c := &nodeClient{}
+	c := &Node{}
 	c.stream = func(ctx context.Context, p peer.ID, route string, payload any) ([]byte, error) {
 		return nil, boom
 	}

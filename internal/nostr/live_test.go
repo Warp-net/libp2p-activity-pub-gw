@@ -34,8 +34,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 type pushed struct {
@@ -84,9 +84,9 @@ func TestNostrLivePushesFollowedNotes(t *testing.T) {
 	b := testNostrBridge(t, relay)
 
 	rec := &pushRecorder{}
-	live := NewLive(b, rec.push)
+	live := newLive(b, rec.push)
 	live.resubscribeDelay = 10 * time.Millisecond
-	b.Trusted = live.Trusted
+	b.trusted = live.Trusted
 
 	live.SetFollow("01WARPUSER", Handle(alice.PK), false)
 	live.SetFollow("01WARPUSER", "alice@damus.io", false)
@@ -148,7 +148,7 @@ func (s nostrScanRequester) RequestUser(userID, route string, _ any) ([]byte, er
 
 func TestNostrLiveScanRebuildsFollows(t *testing.T) {
 	alice, bob := nostrtest.NewKey(), nostrtest.NewKey()
-	live := NewLive(testNostrBridge(t), nil)
+	live := newLive(testNostrBridge(t), nil)
 	live.scan(nostrScanRequester{
 		users: []warp.User{{Id: "01NATIVE"}, {Id: Handle(alice.PK), Network: warp.NostrNetwork}, {Id: "01EMPTY"}},
 		followings: map[string][]string{

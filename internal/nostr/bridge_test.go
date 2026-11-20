@@ -32,8 +32,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 func TestNostrHandles(t *testing.T) {
@@ -239,7 +239,7 @@ func TestNostrRepliesAndStatsTrust(t *testing.T) {
 		stranger.Sign(t, kindRepost, "", now, []string{"e", id}),
 	)
 	b := testNostrBridge(t, relay)
-	b.Trusted = trustedKeys{friend.PK: true, author.PK: true}.has
+	b.trusted = trustedKeys{friend.PK: true, author.PK: true}.has
 
 	if _, err := b.GetTweet(testCtx(t), id); err != nil {
 		t.Fatalf("GetTweet: %v", err)

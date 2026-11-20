@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/oklog/ulid/v2"
 )
@@ -51,7 +51,6 @@ const (
 	nostrActorTTL        = time.Minute
 	nostrPublishTimeout  = time.Minute
 	nostrPublishInFlight = 16
-	FollowPages          = 10
 )
 
 // Links are the gateway's urls of Warpnet users and their content.
@@ -74,16 +73,16 @@ type Publisher struct {
 	keys    *Keys
 	bridge  *Bridge
 	home    HomeReader
-	Network string
+	network string
 	links   Links
 
 	actors *expirable.LRU[string, warp.User]
 	sem    chan struct{}
 }
 
-func NewPublisher(keys *Keys, bridge *Bridge, home HomeReader, network string, links Links) *Publisher {
+func newPublisher(keys *Keys, bridge *Bridge, home HomeReader, network string, links Links) *Publisher {
 	return &Publisher{
-		keys: keys, bridge: bridge, home: home, Network: network, links: links,
+		keys: keys, bridge: bridge, home: home, network: network, links: links,
 		actors: expirable.NewLRU[string, warp.User](nostrCacheSize, nil, nostrActorTTL),
 		sem:    make(chan struct{}, nostrPublishInFlight),
 	}
@@ -92,7 +91,7 @@ func NewPublisher(keys *Keys, bridge *Bridge, home HomeReader, network string, l
 // consents reports whether userID's actions may be published to Nostr: on
 // unless the user opted out at sign-up.
 func (p *Publisher) consents(userID string) bool {
-	if p.Network != warp.DefaultNetwork { // testnet stays off the public relays
+	if p.network != warp.DefaultNetwork { // testnet stays off the public relays
 		return false
 	}
 	u, ok := p.actors.Get(userID)
@@ -111,7 +110,7 @@ func (p *Publisher) signer(userID string) ([32]byte, string, bool) {
 	if !p.consents(userID) {
 		return sk, "", false
 	}
-	sk, ok := p.keys.secretKey(p.Network, userID)
+	sk, ok := p.keys.secretKey(p.network, userID)
 	if !ok {
 		return sk, "", false
 	}
@@ -144,11 +143,11 @@ func (p *Publisher) send(ctx context.Context, sk [32]byte, ev nostrEvent, relays
 	ev.CreatedAt = time.Now().Unix()
 	signed, ok := signEvent(sk, ev)
 	if !ok {
-		warp.NetLog(p.Network).Warnf("nostr: cannot sign a kind %d event", ev.Kind)
+		warp.NetLog(p.network).Warnf("nostr: cannot sign a kind %d event", ev.Kind)
 		return
 	}
 	n := p.bridge.relays.publish(ctx, append(append([]string{}, p.bridge.defaults...), relays...), signed)
-	warp.NetLog(p.Network).Infof("nostr: published kind %d %s to %d relays", signed.Kind, signed.ID, n)
+	warp.NetLog(p.network).Infof("nostr: published kind %d %s to %d relays", signed.Kind, signed.ID, n)
 }
 
 // statusURL is the gateway url of a Warpnet tweet, the NIP-48 proxy id that
@@ -343,7 +342,7 @@ func (p *Publisher) Follow(actor, handle string, undo bool) {
 	for _, id := range ids {
 		pk, ok := nostrPubKey(id)
 		if _, err := ulid.ParseStrict(id); !ok && err == nil && p.consents(id) {
-			pk, ok = p.keys.pubKey(p.Network, id)
+			pk, ok = p.keys.pubKey(p.network, id)
 		}
 		if !ok || seen[pk] || pk == changed {
 			continue

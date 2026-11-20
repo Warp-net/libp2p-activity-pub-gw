@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
@@ -64,7 +64,7 @@ type nostrOutbound struct {
 	started map[string]bool
 }
 
-func NewOutbound(ctx context.Context, req warp.Requester, pub *Publisher) *nostrOutbound {
+func newOutbound(ctx context.Context, req warp.Requester, pub *Publisher) *nostrOutbound {
 	return &nostrOutbound{ctx: ctx, req: req, pub: pub, retry: nostrScanRetry, started: map[string]bool{}}
 }
 
@@ -102,7 +102,7 @@ func (o *nostrOutbound) start(owner string) {
 		return
 	}
 	o.started[owner] = true
-	warp.NetLog(o.pub.Network).Infof("nostr: publishing %s", owner)
+	warp.NetLog(o.pub.network).Infof("nostr: publishing %s", owner)
 	go newNostrPostPoller(o.req, o.pub, owner).run(o.ctx)
 }
 

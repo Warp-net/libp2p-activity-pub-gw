@@ -18,5 +18,5 @@ network instead or ask before adding it.
 - Go filenames use hyphens, not underscores.
 
 ## Versioning
-- Increment the patch version in the `gatewayVersion` const (`main.go`) on
+- Increment the patch version in the `version` const (`cmd/bridge-gateway/main.go`) on
   every commit.

@@ -33,7 +33,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
+	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
 )
 
 func testRelayPool() *RelayPool {
@@ -48,7 +48,7 @@ func testNostrBridge(t *testing.T, relays ...*nostrtest.Relay) *Bridge {
 	for _, r := range relays {
 		urls = append(urls, r.URL())
 	}
-	return NewBridge(testRelayPool(), urls, "12D3KooWGateway", "gw.example")
+	return newBridge(testRelayPool(), urls, "12D3KooWGateway", "gw.example")
 }
 
 func testCtx(t *testing.T) context.Context {

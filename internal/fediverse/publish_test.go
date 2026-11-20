@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse/fediversetest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/fediverse/fediversetest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 func TestDeliverToFollowersFansOut(t *testing.T) {
