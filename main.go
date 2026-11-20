@@ -73,7 +73,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.124"
+const gatewayVersion = "0.1.125"
 
 // Developer's switches, not deployment config: nostrEnabled runs the Nostr
 // bridge, nostrPublish writes consenting users' content to Nostr.

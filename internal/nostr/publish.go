@@ -47,7 +47,7 @@ import (
 
 const (
 	nostrConsentKey      = "nostr"
-	nostrConsentAllow    = "allow"
+	nostrConsentDeny     = "deny"
 	nostrActorTTL        = time.Minute
 	nostrPublishTimeout  = time.Minute
 	nostrPublishInFlight = 16
@@ -77,23 +77,20 @@ type Publisher struct {
 	Network string
 	links   Links
 
-	// allowed remembers consent once seen: it is given at sign-up and cannot
-	// be taken back, so a later read never revokes it.
-	allowed *expirable.LRU[string, struct{}]
-	actors  *expirable.LRU[string, warp.User]
-	sem     chan struct{}
+	actors *expirable.LRU[string, warp.User]
+	sem    chan struct{}
 }
 
 func NewPublisher(keys *Keys, bridge *Bridge, home HomeReader, network string, links Links) *Publisher {
 	return &Publisher{
 		keys: keys, bridge: bridge, home: home, Network: network, links: links,
-		allowed: expirable.NewLRU[string, struct{}](nostrOwnedKeys, nil, 0),
-		actors:  expirable.NewLRU[string, warp.User](nostrCacheSize, nil, nostrActorTTL),
-		sem:     make(chan struct{}, nostrPublishInFlight),
+		actors: expirable.NewLRU[string, warp.User](nostrCacheSize, nil, nostrActorTTL),
+		sem:    make(chan struct{}, nostrPublishInFlight),
 	}
 }
 
-// consents reports whether userID's actions may be published to Nostr.
+// consents reports whether userID's actions may be published to Nostr: on
+// unless the user opted out at sign-up.
 func (p *Publisher) consents(userID string) bool {
 	if p.Network != warp.DefaultNetwork { // testnet stays off the public relays
 		return false
@@ -105,10 +102,7 @@ func (p *Publisher) consents(userID string) bool {
 		}
 		p.actors.Add(userID, u)
 	}
-	if u.Metadata[nostrConsentKey] == nostrConsentAllow {
-		p.allowed.Add(userID, struct{}{})
-	}
-	return p.allowed.Contains(userID) && !u.Locked
+	return u.Metadata[nostrConsentKey] != nostrConsentDeny && !u.Locked
 }
 
 // signer is the key of a consenting user.
