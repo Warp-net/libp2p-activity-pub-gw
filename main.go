@@ -73,7 +73,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.118"
+const gatewayVersion = "0.1.119"
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -126,10 +126,7 @@ func main() {
 	// so multiNode locates each user on the network that has them.
 	var src fediverse.WarpnetSource = fediverse.StaticSource{} // empty fallback when no network is reachable
 	var nodes *multiNode
-	if os.Getenv("GATEWAY_P2P_SEED") == "" {
-		log.Warnf("gateway: GATEWAY_P2P_SEED is unset; running under the public legacy identity, which nodes trust with nothing secret")
-	}
-	clients := connectNetworks(appCtx)
+	clients := connectNetworks(appCtx, identitySeed(key))
 	if len(clients) == 0 {
 		log.Warnln("gateway: no Warpnet network reachable; serving the static profile only")
 	} else {

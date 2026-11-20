@@ -109,10 +109,10 @@ func networkDisabled(network string) bool {
 // connectNetworks joins every configured network. A network that cannot be
 // joined is logged and skipped rather than taking the whole gateway down: the
 // others still resolve and federate their own users.
-func connectNetworks(ctx context.Context) []*nodeClient {
+func connectNetworks(ctx context.Context, seed string) []*nodeClient {
 	var clients []*nodeClient
 	for _, network := range configuredNetworks() {
-		cli, err := connectNetwork(ctx, network)
+		cli, err := connectNetwork(ctx, network, seed)
 		if err != nil {
 			log.Warnf("gateway: joining %s: %v", network, err)
 			continue

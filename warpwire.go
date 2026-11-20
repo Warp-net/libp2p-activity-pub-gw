@@ -32,8 +32,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
@@ -52,19 +55,18 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-// defaultGatewaySeed is the legacy, public identity seed: anyone can claim
-// its peer id, so nodes trust nothing secret to it. Production sets
-// GATEWAY_P2P_SEED, whose peer id warpnet pins as fediverse.GatewayNodeID.
-// The same identity is used on every network: they are PSK-isolated, so the
-// peer id can (and must) be the one warpnet expects on each of them.
+// defaultGatewaySeed is the legacy, public identity seed, kept for tests:
+// anyone can claim its peer id.
 const defaultGatewaySeed = "warpnet-activitypub-gateway"
 
-// gatewaySeed is the gateway's libp2p identity seed. It is never logged.
-func gatewaySeed() string {
-	if seed := os.Getenv("GATEWAY_P2P_SEED"); seed != "" {
-		return seed
-	}
-	return defaultGatewaySeed
+const p2pSeedDomain = "warpnet/gateway/p2p/v1"
+
+// identitySeed derives the gateway's libp2p identity from its secret signing
+// key, so every gateway has its own stable peer id with nothing to configure.
+// The same identity is used on every network: they are PSK-isolated.
+func identitySeed(key *rsa.PrivateKey) string {
+	sum := sha256.Sum256(append([]byte(p2pSeedDomain), x509.MarshalPKCS1PrivateKey(key)...))
+	return hex.EncodeToString(sum[:])
 }
 
 // p2pListenByNetwork is each network's libp2p listen address. The gateway joins

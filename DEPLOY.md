@@ -64,7 +64,6 @@ are required:
 | `GATEWAY_DISCOVERY_HOST` | Mastodon instance supplying who-to-follow candidates; empty disables discovery | `mastodon.social` |
 | `GATEWAY_NOSTR_RELAYS` | comma-separated `wss://` relays replacing the default Nostr relays | damus, primal, nos.lol, purplepag.es, user.kindpag.es |
 | `GATEWAY_DISABLE_NOSTR` | to switch the Nostr bridge off | on |
-| `GATEWAY_P2P_SEED` | secret seed of the gateway's libp2p identity; warpnet pins the resulting peer id, and users' nodes put their bridge key (the gateway's source of their Nostr key) only in messages to it. Bridge keys live in memory only. Never logged. A self-hosted gateway sets its own seed and its users set its peer id (logged at start) as their gateway | unset: the public legacy identity, which nodes trust with nothing secret |
 | `GATEWAY_NOSTR_PUBLISH` | `true` publishes consenting users' posts, edits, deletions and profiles, and their replies, quotes, reactions, reposts and follow lists, to Nostr, and serves their NIP-05 `<ulid>@<gateway host>` at `/.well-known/nostr.json`. Keep it off until the gateway checks that a write comes from the user's home node | off |
 
 Who-to-follow uses the instance's public `/api/v1/directory` (`order=active`,
@@ -124,6 +123,9 @@ The gateway joins Warpnet through the network's bootstrap nodes on its own — n
   internet.
 - The `/data` volume holds the RSA key, the follower fallback, and the Tailscale
   node identity, so the `*.ts.net` hostname stays stable across restarts.
+- The gateway's libp2p peer id is derived from that RSA key and logged at start
+  (`nodeserver: serving … as <peer>`). Users of a self-hosted gateway set it as
+  their gateway in the node settings; losing the key changes it.
 
 ---
 
