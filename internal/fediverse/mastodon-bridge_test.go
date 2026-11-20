@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse/fediversetest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/fediverse/fediversetest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/domain"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )

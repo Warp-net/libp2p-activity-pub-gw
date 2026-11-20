@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 func TestEncodeDecodeActorID(t *testing.T) {

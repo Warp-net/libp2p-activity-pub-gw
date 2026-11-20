@@ -1,7 +1,7 @@
 // Copyright 2025 Vadim Filin
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package main
+package node
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 
 	wjson "github.com/Warp-net/warpnet/json"
 	"github.com/Warp-net/warpnet/security"
@@ -105,7 +105,7 @@ func TestStreamSendRejectsAnUnmarshalablePayload(t *testing.T) {
 	c := newTestNode(t, "marshal-fail")
 	// A channel cannot be JSON-encoded; the failure must surface before any
 	// stream is opened.
-	_, err := streamSend(context.Background(), c.h, c.h.ID(), c.priv, "/route", make(chan int))
+	_, err := sendStream(context.Background(), c.host, c.host.ID(), c.privKey, "/route", make(chan int))
 	if err == nil {
 		t.Fatal("expected a marshal error")
 	}
@@ -116,7 +116,7 @@ func TestStreamSendReportsAnUndialablePeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	other := newTestNode(t, "never-connected")
-	if _, err := streamSend(ctx, c.h, other.h.ID(), c.priv, "/route", nil); err == nil {
+	if _, err := sendStream(ctx, c.host, other.host.ID(), c.privKey, "/route", nil); err == nil {
 		t.Fatal("expected a dial error for a peer with no known addresses")
 	}
 }
@@ -130,11 +130,11 @@ func TestIdentitySeedFollowsTheSigningKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed := identitySeed(a)
-	if again := identitySeed(a); again != seed {
+	seed := IdentitySeed(a)
+	if again := IdentitySeed(a); again != seed {
 		t.Fatal("one signing key must give one identity")
 	}
-	if seed == identitySeed(b) || seed == defaultGatewaySeed {
+	if seed == IdentitySeed(b) || seed == defaultGatewaySeed {
 		t.Fatal("every gateway must get its own identity")
 	}
 }

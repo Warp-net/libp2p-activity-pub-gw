@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse/fediversetest"
-	"github.com/Warp-net/activity-pub-gw/internal/netguard"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/fediverse/fediversetest"
+	"github.com/Warp-net/bridge-gateway/internal/netguard"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
@@ -385,7 +385,7 @@ func TestNodeInfo(t *testing.T) {
 		t.Fatalf("version = %v", info["version"])
 	}
 	sw, _ := info["software"].(map[string]any)
-	if sw["name"] != "warpnet-fediverse-gateway" || sw["version"] != version {
+	if sw["name"] != "bridge-gateway" || sw["version"] != version {
 		t.Fatalf("software = %+v", sw)
 	}
 	if info["openRegistrations"] != false {

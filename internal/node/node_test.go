@@ -1,7 +1,7 @@
 // Copyright 2025 Vadim Filin
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package main
+package node
 
 import (
 	"context"
@@ -13,10 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/event"
-	"github.com/hashicorp/golang-lru/v2/expirable"
 
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -24,7 +22,7 @@ import (
 
 func TestNetworkEntries(t *testing.T) {
 	for _, network := range []string{warp.DefaultNetwork, "testnet"} {
-		entries, err := networkEntries(network)
+		entries, err := parseEntries(network)
 		if err != nil {
 			t.Fatalf("%s: %v", network, err)
 		}
@@ -40,7 +38,7 @@ func TestNetworkEntries(t *testing.T) {
 	}
 
 	t.Run("an unknown network has no entry peers", func(t *testing.T) {
-		if _, err := networkEntries("nope"); !errors.Is(err, errNoEntryPeers) {
+		if _, err := parseEntries("nope"); !errors.Is(err, errNoEntryPeers) {
 			t.Fatalf("err = %v, want errNoEntryPeers", err)
 		}
 	})
@@ -49,7 +47,7 @@ func TestNetworkEntries(t *testing.T) {
 // connectNetwork must fail fast (rather than build a host) when asked for a
 // network with no bootstrap relays.
 func TestConnectNetworkRejectsAnUnknownNetwork(t *testing.T) {
-	if _, err := connectNetwork(context.Background(), "definitely-not-a-warpnet", defaultGatewaySeed); !errors.Is(err, errNoEntryPeers) {
+	if _, err := NewNode(context.Background(), "definitely-not-a-warpnet", defaultGatewaySeed); !errors.Is(err, errNoEntryPeers) {
 		t.Fatalf("err = %v, want errNoEntryPeers", err)
 	}
 }
@@ -60,7 +58,7 @@ func TestConnectNetworkRejectsAnUnknownNetwork(t *testing.T) {
 func TestP2PListenAddrsAreDistinct(t *testing.T) {
 	seen := make(map[string]string, len(bootstrapByNetwork))
 	for network := range bootstrapByNetwork {
-		addr, ok := p2pListenByNetwork[network]
+		addr, ok := listenByNetwork[network]
 		if !ok {
 			t.Fatalf("network %q has bootstrap peers but no listen address", network)
 		}
@@ -77,7 +75,7 @@ func TestMemberCandidates(t *testing.T) {
 	c.relays[relay] = struct{}{}
 
 	member := peer.ID("member-1")
-	c.good = []peer.ID{member, member, relay, c.h.ID(), ""}
+	c.members = []peer.ID{member, member, relay, c.host.ID(), ""}
 
 	got := c.memberCandidates(warp.RouteGetUser)
 	// Relays serve discovery only, our own id is not a data peer, and duplicates
@@ -90,7 +88,7 @@ func TestMemberCandidates(t *testing.T) {
 func TestMemberCandidatesIsCapped(t *testing.T) {
 	c := newTestNode(t, "cap")
 	for i := range maxMemberCandidates + 10 {
-		c.good = append(c.good, peer.ID("peer-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+string(rune('a'+i/26))))
+		c.members = append(c.members, peer.ID("peer-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+string(rune('a'+i/26))))
 	}
 	if got := len(c.memberCandidates(warp.RouteGetUser)); got > maxMemberCandidates {
 		t.Fatalf("candidates = %d, want at most %d", got, maxMemberCandidates)
@@ -98,23 +96,23 @@ func TestMemberCandidatesIsCapped(t *testing.T) {
 }
 
 func TestRememberMovesTheAnsweringPeerToTheFront(t *testing.T) {
-	c := &nodeClient{good: []peer.ID{"a", "b", "c"}}
+	c := &Node{members: []peer.ID{"a", "b", "c"}}
 	c.remember("c")
-	if len(c.good) != 3 || c.good[0] != "c" {
-		t.Fatalf("good = %v, want c first and no duplicate", c.good)
+	if len(c.members) != 3 || c.members[0] != "c" {
+		t.Fatalf("good = %v, want c first and no duplicate", c.members)
 	}
 	c.remember("d")
-	if len(c.good) != 4 || c.good[0] != "d" {
-		t.Fatalf("good = %v", c.good)
+	if len(c.members) != 4 || c.members[0] != "d" {
+		t.Fatalf("good = %v", c.members)
 	}
 
 	t.Run("the cache stays bounded", func(t *testing.T) {
-		c := &nodeClient{}
+		c := &Node{}
 		for i := range maxMemberCandidates + 20 {
 			c.remember(peer.ID(string(rune('a'+i%26)) + string(rune('a'+i/26))))
 		}
-		if len(c.good) > maxMemberCandidates {
-			t.Fatalf("good = %d entries, want at most %d", len(c.good), maxMemberCandidates)
+		if len(c.members) > maxMemberCandidates {
+			t.Fatalf("good = %d entries, want at most %d", len(c.members), maxMemberCandidates)
 		}
 	})
 }
@@ -127,9 +125,9 @@ func TestRequestWithoutDiscoveredMembers(t *testing.T) {
 	}
 }
 
-// stubbedClient is a nodeClient whose wire send is replaced, so owner routing can
+// stubbedClient is a Node whose wire send is replaced, so owner routing can
 // be exercised without a network.
-func stubbedClient(t *testing.T, send func(peer.ID, string, any) ([]byte, error)) (*nodeClient, *[]peer.ID) {
+func stubbedClient(t *testing.T, send func(peer.ID, string, any) ([]byte, error)) (*Node, *[]peer.ID) {
 	t.Helper()
 	c := newTestNode(t, "stubbed-"+t.Name())
 	var mu sync.Mutex
@@ -144,7 +142,7 @@ func stubbedClient(t *testing.T, send func(peer.ID, string, any) ([]byte, error)
 }
 
 func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
-	owner := newTestNode(t, "owner-node").h.ID()
+	owner := newTestNode(t, "owner-node").host.ID()
 	member := peer.ID("member-1")
 
 	c, targets := stubbedClient(t, func(p peer.ID, route string, _ any) ([]byte, error) {
@@ -153,7 +151,7 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 		}
 		return []byte(`{"ok":true}`), nil
 	})
-	c.good = []peer.ID{member}
+	c.members = []peer.ID{member}
 
 	// Routes like GET_FOLLOWERS are authoritative only on the owner node; a random
 	// member answers with an empty list.
@@ -176,7 +174,7 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 	})
 
 	t.Run("forgetOwner forces a re-resolve", func(t *testing.T) {
-		c.forgetOwner("alice")
+		c.owners.Remove("alice")
 		before := len(*targets)
 		if _, err := c.RequestUser("alice", warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: "alice"}); err != nil {
 			t.Fatal(err)
@@ -188,7 +186,7 @@ func TestRequestUserTargetsTheOwnerNode(t *testing.T) {
 }
 
 func TestRequestUserFallsBackToBroadcast(t *testing.T) {
-	ownerNode := newTestNode(t, "unreachable-owner").h.ID()
+	ownerNode := newTestNode(t, "unreachable-owner").host.ID()
 	member := peer.ID("member-1")
 	boom := errors.New("owner unreachable")
 
@@ -202,7 +200,7 @@ func TestRequestUserFallsBackToBroadcast(t *testing.T) {
 			return []byte(`{"broadcast":true}`), nil
 		}
 	})
-	c.good = []peer.ID{member}
+	c.members = []peer.ID{member}
 
 	bt, err := c.RequestUser("alice", warp.RouteGetFollowers, warp.GetFollowersEvent{UserId: "alice"})
 	if err != nil {
@@ -215,7 +213,7 @@ func TestRequestUserFallsBackToBroadcast(t *testing.T) {
 		t.Fatalf("targets = %v, want the last attempt broadcast, not the dead owner", got)
 	}
 	// A failed owner must be dropped so the next call re-resolves it.
-	if _, cached := c.owner.Get("alice"); cached {
+	if _, cached := c.owners.Get("alice"); cached {
 		t.Fatal("a failed owner stayed cached")
 	}
 }
@@ -234,7 +232,7 @@ func TestOwnerNodeResolutionFailures(t *testing.T) {
 	for name, answer := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := newTestNode(t, "owner-fail-"+name)
-			c.good = []peer.ID{member}
+			c.members = []peer.ID{member}
 			c.stream = func(_ context.Context, _ peer.ID, route string, payload any) ([]byte, error) {
 				if route == warp.RouteGetUser {
 					return answer(route, payload)
@@ -248,26 +246,22 @@ func TestOwnerNodeResolutionFailures(t *testing.T) {
 	}
 }
 
-func TestNodeClientClose(t *testing.T) {
-	var nilClient *nodeClient
-	nilClient.close() // must not panic
-
-	c := &nodeClient{owner: expirable.NewLRU[string, peer.ID](1, nil, ownerCacheTTL)}
-	c.close() // no host, no dht
-
-	real := newTestNode(t, "closable")
-	real.close()
+func TestNodeClose(t *testing.T) {
+	n := newTestNode(t, "closable")
+	if err := n.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 }
 
-func TestNodeSourceGetUser(t *testing.T) {
+func TestNodeGetUser(t *testing.T) {
 	member := peer.ID("member-1")
 
-	newSource := func(t *testing.T, answer func() ([]byte, error)) nodeSource {
+	newSource := func(t *testing.T, answer func() ([]byte, error)) *Node {
 		t.Helper()
 		c := newTestNode(t, "source-"+t.Name())
-		c.good = []peer.ID{member}
+		c.members = []peer.ID{member}
 		c.stream = func(context.Context, peer.ID, string, any) ([]byte, error) { return answer() }
-		return nodeSource{client: c}
+		return c
 	}
 
 	t.Run("maps a warpnet profile onto the actor fields", func(t *testing.T) {
@@ -308,19 +302,6 @@ func TestNodeSourceGetUser(t *testing.T) {
 	})
 }
 
-func TestStaticSource(t *testing.T) {
-	s := fediverse.StaticSource{User: fediverse.WarpnetUser{ID: "alice", PreferredUsername: "alice", DisplayName: "Alice"}}
-	if u, ok := s.GetUser("alice"); !ok || u.DisplayName != "Alice" {
-		t.Fatalf("got (%+v, %v)", u, ok)
-	}
-	if _, ok := s.GetUser("bob"); ok {
-		t.Fatal("a static source serves exactly one user")
-	}
-	if _, ok := (fediverse.StaticSource{}).GetUser(""); !ok {
-		t.Fatal("the empty fallback matches the empty username")
-	}
-}
-
 // streamToMember must still attempt the send when there is no DHT to resolve
 // addresses through (the dev/no-discovery path), reporting the dial failure.
 func TestStreamToMemberWithoutADHT(t *testing.T) {
@@ -328,16 +309,16 @@ func TestStreamToMemberWithoutADHT(t *testing.T) {
 	other := newTestNode(t, "unknown-peer")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := c.streamToMember(ctx, other.h.ID(), warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"}); err == nil {
+	if _, err := c.streamToMember(ctx, other.host.ID(), warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"}); err == nil {
 		t.Fatal("expected a dial error for a peer with no known addresses")
 	}
 }
 
 // withDHT joins the node to an isolated Kademlia DHT so the discovery paths that
 // only run when a routing table exists are exercised.
-func withDHT(t *testing.T, c *nodeClient) *nodeClient {
+func withDHT(t *testing.T, c *Node) *Node {
 	t.Helper()
-	kdht, err := dht.New(c.h, dht.Mode(dht.ModeServer))
+	kdht, err := dht.New(c.host, dht.Mode(dht.ModeServer))
 	if err != nil {
 		t.Fatalf("dht: %v", err)
 	}
@@ -354,7 +335,7 @@ func TestStreamToMemberResolvesThroughTheDHT(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := c.streamToMember(ctx, other.h.ID(), warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"}); err == nil {
+	if _, err := c.streamToMember(ctx, other.host.ID(), warp.RouteGetUser, warp.GetUserEvent{UserId: "alice"}); err == nil {
 		t.Fatal("expected a failure for a peer no routing table knows")
 	}
 }
@@ -410,11 +391,11 @@ func TestTryMembersSkipsARateLimitedMember(t *testing.T) {
 	if string(bt) != `{"id":"alice"}` {
 		t.Fatalf("tryMembers returned the rate-limit body: %s", bt)
 	}
-	if len(c.good) == 0 || c.good[0] != member {
-		t.Fatalf("winning peer not remembered: %v", c.good)
+	if len(c.members) == 0 || c.members[0] != member {
+		t.Fatalf("winning peer not remembered: %v", c.members)
 	}
-	if slices.Contains(c.good, limited) {
-		t.Fatalf("rate-limited peer was remembered as good: %v", c.good)
+	if slices.Contains(c.members, limited) {
+		t.Fatalf("rate-limited peer was remembered as members: %v", c.members)
 	}
 	if !c.isThrottled(warp.RouteGetUser, limited) {
 		t.Fatal("rate-limited peer was not marked to cool down")
@@ -442,7 +423,7 @@ func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
 	var mu sync.Mutex
 	var inFlight int
 
-	c := &nodeClient{}
+	c := &Node{}
 	c.stream = func(ctx context.Context, _ peer.ID, _ string, _ any) ([]byte, error) {
 		mu.Lock()
 		inFlight++
@@ -475,18 +456,19 @@ func TestTryMembersDoesNotHedgeWrites(t *testing.T) {
 	}
 }
 
-func TestDemoteThrottledMovesCoolingMembersLast(t *testing.T) {
+func TestMemberCandidatesPutCoolingMembersLast(t *testing.T) {
 	c := newTestNode(t, "demote")
 	cooling, ready := peer.ID("cooling"), peer.ID("ready")
+	c.members = []peer.ID{cooling, ready}
 	c.markThrottled(warp.RouteGetUser, cooling)
 
-	got := c.demoteThrottled(warp.RouteGetUser, []peer.ID{cooling, ready})
+	got := c.memberCandidates(warp.RouteGetUser)
 	if len(got) != 2 || got[0] != ready || got[1] != cooling {
-		t.Fatalf("demoteThrottled = %v, want the cooling member last but kept", got)
+		t.Fatalf("candidates = %v, want the cooling member last but kept", got)
 	}
 }
 
-func TestLookupUserCachesTheProfile(t *testing.T) {
+func TestGetUserCachesTheProfile(t *testing.T) {
 	var calls int
 	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
 		if route != warp.RouteGetUser {
@@ -495,20 +477,20 @@ func TestLookupUserCachesTheProfile(t *testing.T) {
 		calls++
 		return json.Marshal(warp.User{Id: "alice", Username: "Alice"})
 	})
-	c.good = []peer.ID{peer.ID("member-1")}
+	c.members = []peer.ID{peer.ID("member-1")}
 
 	for range 3 {
-		u, ok := c.lookupUser("alice")
+		u, ok := c.GetUser("alice")
 		if !ok || u.DisplayName != "Alice" {
-			t.Fatalf("lookupUser = %+v, %v", u, ok)
+			t.Fatalf("GetUser = %+v, %v", u, ok)
 		}
 	}
 	if calls != 1 {
-		t.Fatalf("lookupUser hit the node %d times, want 1", calls)
+		t.Fatalf("GetUser hit the node %d times, want 1", calls)
 	}
 }
 
-func TestLookupUserDoesNotCacheAMiss(t *testing.T) {
+func TestGetUserDoesNotCacheAMiss(t *testing.T) {
 	var calls int
 	c, _ := stubbedClient(t, func(_ peer.ID, route string, _ any) ([]byte, error) {
 		if route == warp.RouteGetUser {
@@ -516,14 +498,14 @@ func TestLookupUserDoesNotCacheAMiss(t *testing.T) {
 		}
 		return []byte(`{}`), nil
 	})
-	c.good = []peer.ID{peer.ID("member-1")}
+	c.members = []peer.ID{peer.ID("member-1")}
 
 	for range 2 {
-		if _, ok := c.lookupUser("nobody"); ok {
-			t.Fatal("lookupUser: unknown handle reported as found")
+		if _, ok := c.GetUser("nobody"); ok {
+			t.Fatal("GetUser: unknown handle reported as found")
 		}
 	}
 	if calls != 2 {
-		t.Fatalf("lookupUser made %d node calls, want 2 (misses are not cached)", calls)
+		t.Fatalf("GetUser made %d node calls, want 2 (misses are not cached)", calls)
 	}
 }

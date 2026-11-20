@@ -42,9 +42,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/logring"
-	"github.com/Warp-net/activity-pub-gw/internal/netguard"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/logring"
+	"github.com/Warp-net/bridge-gateway/internal/netguard"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/retrier"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 
@@ -91,7 +91,7 @@ const (
 
 // UserAgent identifies the gateway on outbound Fediverse requests; some
 // instances and CDNs reject the default Go user-agent.
-func UserAgent() string { return "warpnet-gateway/" + version }
+func UserAgent() string { return "bridge-gateway/" + version }
 
 // version is the gateway build, stamped into the User-Agent and nodeinfo;
 // main sets it once at start.
@@ -639,7 +639,7 @@ func (g *Gateway) handleNodeInfoLinks(w http.ResponseWriter, _ *http.Request) {
 func (g *Gateway) handleNodeInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, "application/json", map[string]any{
 		"version":           "2.0",
-		"software":          map[string]any{"name": "warpnet-fediverse-gateway", "version": version},
+		"software":          map[string]any{"name": "bridge-gateway", "version": version},
 		"protocols":         []string{"activitypub"},
 		"usage":             map[string]any{"users": map[string]any{"total": 1}},
 		"openRegistrations": false,

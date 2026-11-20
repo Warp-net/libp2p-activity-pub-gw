@@ -38,8 +38,8 @@ import (
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/nip19"
-	"github.com/Warp-net/activity-pub-gw/internal/netguard"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/netguard"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 

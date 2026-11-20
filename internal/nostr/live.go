@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"golang.org/x/time/rate"
 )
@@ -72,7 +72,7 @@ type Live struct {
 	resubscribeDelay time.Duration
 }
 
-func NewLive(bridge *Bridge, push func(follower string, t warp.Tweet) error) *Live {
+func newLive(bridge *Bridge, push func(follower string, t warp.Tweet) error) *Live {
 	return &Live{
 		bridge:  bridge,
 		push:    push,

@@ -36,7 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/domain"
 )
 

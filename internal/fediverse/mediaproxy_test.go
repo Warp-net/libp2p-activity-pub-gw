@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 func TestEncodeDecodeMediaRef(t *testing.T) {

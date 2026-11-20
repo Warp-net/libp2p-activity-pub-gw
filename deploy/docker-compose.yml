@@ -1,7 +1,7 @@
 services:
-  fediverse-gateway:
-    container_name: fediverse-gateway
-    image: ghcr.io/warp-net/warpnet-gateway:latest
+  bridge-gateway:
+    container_name: bridge-gateway
+    image: ghcr.io/warp-net/bridge-gateway:latest
     network_mode: host
     restart: always
     environment:

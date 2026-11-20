@@ -63,7 +63,7 @@ type Keys struct {
 
 type ownedKey struct{ network, userID string }
 
-func NewKeys(source KeySource) *Keys {
+func newKeys(source KeySource) *Keys {
 	return &Keys{
 		source: source,
 		owned:  expirable.NewLRU[string, ownedKey](nostrOwnedKeys, nil, 0),

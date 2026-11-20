@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 // The poller must seed existing tweets at startup so a restart doesn't replay

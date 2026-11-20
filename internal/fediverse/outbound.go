@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 
 	log "github.com/sirupsen/logrus"
 )

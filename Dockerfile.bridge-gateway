@@ -1,7 +1,7 @@
 FROM golang:1.26 AS builder
 
-COPY . /gateway
-WORKDIR /gateway
+COPY . /bridge-gateway
+WORKDIR /bridge-gateway
 
 ENV CGO_ENABLED=0
 
@@ -9,7 +9,7 @@ ENV CGO_ENABLED=0
 # packages (it speaks the wire protocol over native libp2p), so there are no
 # submodules and no cgo — a plain module build is enough.
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    go build -ldflags "-s -w" -o /usr/local/bin/fediverse-gateway .
+    go build -ldflags "-s -w" -o /usr/local/bin/bridge-gateway ./cmd/bridge-gateway
 
 FROM gcr.io/distroless/static-debian12
 
@@ -20,5 +20,5 @@ ENV GATEWAY_KEY=/data/key.pem \
     GATEWAY_FUNNEL_DIR=/data/tsnet
 VOLUME ["/data"]
 
-COPY --from=builder /usr/local/bin/fediverse-gateway /usr/local/bin/fediverse-gateway
-CMD ["/usr/local/bin/fediverse-gateway"]
+COPY --from=builder /usr/local/bin/bridge-gateway /usr/local/bin/bridge-gateway
+CMD ["/usr/local/bin/bridge-gateway"]

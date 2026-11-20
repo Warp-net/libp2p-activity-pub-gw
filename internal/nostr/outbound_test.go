@@ -36,8 +36,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
 
 // fakeFeed serves a user's timeline page, swappable between polls.
@@ -161,7 +161,7 @@ func TestNostrPostPollerPublishesPostsEditsAndDeletes(t *testing.T) {
 func TestNostrOutboundStartsConsentingUsersOnce(t *testing.T) {
 	fx := newPublishFixture(t)
 	feed := &fakeFeed{users: []warp.User{{Id: aliceULID}, optedOut(carolULID), {Id: "bob@mastodon.social", Network: warp.MastodonNetwork}}}
-	o := NewOutbound(testCtx(t), feed, fx.pub)
+	o := newOutbound(testCtx(t), feed, fx.pub)
 	o.scan(warp.DefaultOwnerHandle)
 	o.scan(warp.DefaultOwnerHandle)
 	o.mu.Lock()
@@ -186,7 +186,7 @@ func (s startedUser) ok() bool {
 func TestNostrOutboundRetriesAnUnreachableNetworkSoon(t *testing.T) {
 	fx := newPublishFixture(t)
 	feed := &fakeFeed{}
-	o := NewOutbound(testCtx(t), feed, fx.pub)
+	o := newOutbound(testCtx(t), feed, fx.pub)
 	o.retry = 10 * time.Millisecond
 	go o.RunScanner(warp.DefaultOwnerHandle)
 
@@ -197,7 +197,7 @@ func TestNostrOutboundRetriesAnUnreachableNetworkSoon(t *testing.T) {
 
 func TestNostrJSON(t *testing.T) {
 	fx := newPublishFixture(t)
-	srv := httptest.NewServer(NewNIP05Handler(publisherList{fx.pub}.all))
+	srv := httptest.NewServer(newNIP05Handler(publisherList{fx.pub}.all))
 	defer srv.Close()
 
 	code, body := nostrJSONName(t, srv.URL, strings.ToLower(aliceULID))

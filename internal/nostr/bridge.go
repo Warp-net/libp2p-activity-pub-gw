@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/domain"
 	"github.com/Warp-net/warpnet/event"
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -94,17 +94,17 @@ type Bridge struct {
 	defaults []string
 	nodeID   string // gateway peer id stamped onto bridged users
 	selfHost string
-	// Trusted reports whether an author's replies, reactions and reposts may
+	// trusted reports whether an author's replies, reactions and reposts may
 	// enter Warpnet (see nostrLive.trusted); nil trusts nobody.
-	Trusted func(pk string) bool
+	trusted func(pk string) bool
 
-	// Keys recognise the gateway's own npubs and home reads their native
+	// keys recognise the gateway's own npubs and home reads their native
 	// accounts; pub writes to Nostr. All nil while the bridge is read-only.
-	Keys    *Keys
-	Links   Links
-	Home    HomeReader
-	Network string
-	Pub     *Publisher
+	keys    *Keys
+	links   Links
+	home    HomeReader
+	network string
+	pub     *Publisher
 
 	profiles   *expirable.LRU[string, nostrEvent]
 	relayLists *expirable.LRU[string, []string]
@@ -114,7 +114,7 @@ type Bridge struct {
 	entry string
 }
 
-func NewBridge(relays Relays, defaults []string, nodeID, selfHost string) *Bridge {
+func newBridge(relays Relays, defaults []string, nodeID, selfHost string) *Bridge {
 	return &Bridge{
 		relays: relays, defaults: defaults, nodeID: nodeID, selfHost: selfHost, entry: nostrEntryPubKey,
 		profiles:   expirable.NewLRU[string, nostrEvent](nostrCacheSize, nil, nostrProfileTTL),
@@ -125,7 +125,7 @@ func NewBridge(relays Relays, defaults []string, nodeID, selfHost string) *Bridg
 }
 
 func (b *Bridge) isTrusted(pk string) bool {
-	return b.Trusted != nil && b.Trusted(pk)
+	return b.trusted != nil && b.trusted(pk)
 }
 
 // authorRelays is where pk publishes (NIP-65 write relays) plus the defaults.
@@ -208,8 +208,12 @@ func (b *Bridge) prefetchProfiles(ctx context.Context, pks []string) {
 }
 
 // WhoToFollow suggests Nostr accounts to Warpnet: the entry account and the
-// accounts it follows, a way into the Nostr follow graph.
+// accounts it follows, a way into the Nostr follow graph. A nil bridge (Nostr
+// off) suggests nobody.
 func (b *Bridge) WhoToFollow(ctx context.Context) []warp.User {
+	if b == nil {
+		return nil
+	}
 	pks := dedupeStrings(append([]string{b.entry}, b.followList(ctx, b.entry)...))
 	if len(pks) > nostrSuggestions {
 		pks = pks[:nostrSuggestions]
@@ -337,27 +341,27 @@ func (b *Bridge) GetFollowers(ctx context.Context, handle string, _ *string) (wa
 // was derived for, named either by the keys derived so far or by claimed, a
 // user id the derivation must confirm.
 func (b *Bridge) native(pk, claimed string) (warp.User, bool) {
-	if b.Home == nil {
+	if b.home == nil {
 		return warp.User{}, false
 	}
-	o, ok := b.Keys.owner(pk)
-	if !ok || o.network != b.Network {
-		if claimed == "" || !b.Keys.isOwn(pk, b.Network, claimed) {
+	o, ok := b.keys.owner(pk)
+	if !ok || o.network != b.network {
+		if claimed == "" || !b.keys.isOwn(pk, b.network, claimed) {
 			return warp.User{}, false
 		}
-		o = ownedKey{network: b.Network, userID: claimed}
+		o = ownedKey{network: b.network, userID: claimed}
 	}
-	return b.Home.HomeUser(o.userID)
+	return b.home.HomeUser(o.userID)
 }
 
 // selfProxiedUser is the Warpnet user id a profile claims through a NIP-48
 // proxy tag pointing at this gateway.
 func (b *Bridge) selfProxiedUser(ev nostrEvent) string {
 	id, protocol := proxiedFrom(ev)
-	if protocol != "web" || b.Links == nil {
+	if protocol != "web" || b.links == nil {
 		return ""
 	}
-	userID, _ := b.Links.ProfileUser(id)
+	userID, _ := b.links.ProfileUser(id)
 	return userID
 }
 
@@ -366,7 +370,7 @@ func (b *Bridge) selfProxiedUser(ev nostrEvent) string {
 func (b *Bridge) handlesOf(pks []string) []string {
 	out := make([]string, 0, len(pks))
 	for _, pk := range pks {
-		if o, ok := b.Keys.owner(pk); ok && o.network == b.Network {
+		if o, ok := b.keys.owner(pk); ok && o.network == b.network {
 			out = append(out, o.userID)
 			continue
 		}

@@ -41,7 +41,7 @@ type nip05Handler struct {
 	publishers func() []*Publisher
 }
 
-func NewNIP05Handler(publishers func() []*Publisher) http.Handler {
+func newNIP05Handler(publishers func() []*Publisher) http.Handler {
 	return nip05Handler{publishers: publishers}
 }
 
@@ -56,7 +56,7 @@ func (h nip05Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !pub.consents(strings.ToUpper(name)) {
 			continue
 		}
-		pk, ok := pub.keys.pubKey(pub.Network, name)
+		pk, ok := pub.keys.pubKey(pub.network, name)
 		if !ok {
 			continue
 		}

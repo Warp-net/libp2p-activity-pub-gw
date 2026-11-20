@@ -56,7 +56,7 @@ curl -sS --proxytunnel -x "$HTTPS_PROXY" \
 only accepts HTTPS CONNECT tunnels". The Funnel HTTPS URL works with a normal
 `-x "$HTTPS_PROXY"` (it is real TLS on :443).
 
-Fallbacks: `docker logs --since 30m fediverse-gateway` on the droplet
+Fallbacks: `docker logs --since 30m bridge-gateway` on the droplet
 (`make ssh-do` from the warpnet repo). The Docker remote API on :2375 also carries logs
 but a safety classifier may block raw-daemon access — prefer `/logs`.
 
@@ -101,8 +101,8 @@ Traps:
 
 Anchors, and what they mean:
 
-- `gateway: starting version X.Y.Z` — **the running build.** If it does not match your
-  merged `gatewayVersion`, the droplet was not redeployed. Deploy is manual
+- `bridge-gateway: starting version X.Y.Z` — **the running build.** If it does not match your
+  merged `version`, the droplet was not redeployed. Deploy is manual
   (`workflow_dispatch` "Build & Deploy Testnet"); merging `main` does **not** auto-deploy.
 - `nodeserver: serving N public routes as <peer> (owner <handle>)` — the gateway's libp2p
   server is up; `<peer>` is what a Warpnet node discovers as the bridged user's node. It
@@ -156,7 +156,7 @@ go vet ./...
 go test .
 ```
 
-Bump `gatewayVersion` in `main.go` on every commit (see CLAUDE.md) — it is the only way
+Bump `version` in `cmd/bridge-gateway/main.go` on every commit (see CLAUDE.md) — it is the only way
 to tell from `/logs` what is actually running after a deploy.
 
 ### Pinned-warpnet drift is the usual root cause

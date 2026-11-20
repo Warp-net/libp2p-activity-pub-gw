@@ -36,7 +36,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 
 	// mastodon_map holds the pure conversion from loosely-typed ActivityPub
 	// documents to Warpnet's domain types. These functions have no I/O and no

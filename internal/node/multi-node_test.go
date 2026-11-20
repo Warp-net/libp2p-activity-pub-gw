@@ -1,7 +1,7 @@
 // Copyright 2025 Vadim Filin
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package main
+package node
 
 import (
 	"context"
@@ -13,15 +13,15 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/fediverse"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // stubNet is one network's node: its members know the listed users and record
 // every route they are asked for, so a test can prove where a call landed.
 type stubNet struct {
-	client *nodeClient
+	client *Node
 	users  map[string]bool
 
 	mu    sync.Mutex
@@ -37,7 +37,7 @@ func newStubNet(t *testing.T, network string, users ...string) *stubNet {
 	}
 	c := newTestNode(t, "multinet-"+network+"-"+t.Name())
 	c.network = network
-	c.good = []peer.ID{peer.ID("member-" + network)}
+	c.members = []peer.ID{peer.ID("member-" + network)}
 	c.stream = func(_ context.Context, _ peer.ID, route string, payload any) ([]byte, error) {
 		s.mu.Lock()
 		s.calls = append(s.calls, route)
@@ -81,82 +81,10 @@ func (s *stubNet) reset() {
 	s.calls = nil
 }
 
-func TestConfiguredNetworks(t *testing.T) {
-	t.Run("unset joins the default network alone", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "")
-		if got := configuredNetworks(); len(got) != 1 || got[0] != warp.DefaultNetwork {
-			t.Fatalf("networks = %v, want just %s", got, warp.DefaultNetwork)
-		}
-	})
-
-	t.Run("a list joins every network, in order", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "warpnet,testnet")
-		got := configuredNetworks()
-		if len(got) != 2 || got[0] != "warpnet" || got[1] != "testnet" {
-			t.Fatalf("networks = %v", got)
-		}
-	})
-
-	t.Run("whitespace and duplicates are ignored", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", " warpnet , testnet ,,warpnet")
-		got := configuredNetworks()
-		if len(got) != 2 || got[0] != "warpnet" || got[1] != "testnet" {
-			t.Fatalf("networks = %v, want each network once", got)
-		}
-	})
-}
-
-// Each node has its own off switch, so one can be taken out of a running
-// deployment without rewriting NODE_NETWORK.
-func TestNetworkDisableFlags(t *testing.T) {
-	t.Run("disables just the named network", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "warpnet,testnet")
-		t.Setenv("GATEWAY_DISABLE_TESTNET", "true")
-		if got := configuredNetworks(); len(got) != 1 || got[0] != "warpnet" {
-			t.Fatalf("networks = %v, want testnet dropped", got)
-		}
-	})
-
-	t.Run("works for either node", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "warpnet,testnet")
-		t.Setenv("GATEWAY_DISABLE_WARPNET", "1")
-		if got := configuredNetworks(); len(got) != 1 || got[0] != "testnet" {
-			t.Fatalf("networks = %v, want warpnet dropped", got)
-		}
-	})
-
-	t.Run("disabling every network leaves none", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "warpnet,testnet")
-		t.Setenv("GATEWAY_DISABLE_WARPNET", "true")
-		t.Setenv("GATEWAY_DISABLE_TESTNET", "true")
-		if got := configuredNetworks(); len(got) != 0 {
-			t.Fatalf("networks = %v, want none", got)
-		}
-	})
-
-	// A typo must not silently drop a network — only a real boolean switches
-	// a node off.
-	t.Run("an unparseable value keeps the node on", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "warpnet,testnet")
-		t.Setenv("GATEWAY_DISABLE_TESTNET", "maybe")
-		if got := configuredNetworks(); len(got) != 2 {
-			t.Fatalf("networks = %v, want both kept", got)
-		}
-	})
-
-	t.Run("false keeps the node on", func(t *testing.T) {
-		t.Setenv("NODE_NETWORK", "testnet")
-		t.Setenv("GATEWAY_DISABLE_TESTNET", "false")
-		if got := configuredNetworks(); len(got) != 1 {
-			t.Fatalf("networks = %v, want testnet kept", got)
-		}
-	})
-}
-
 func TestMultiNodeResolvesAUserOnWhicheverNetworkHasThem(t *testing.T) {
 	main := newStubNet(t, "warpnet", "alice")
 	test := newStubNet(t, "testnet", "bob")
-	m := newMultiNode([]*nodeClient{main.client, test.client})
+	m := NewMultiNode([]*Node{main.client, test.client})
 
 	for _, tc := range []struct{ user, network string }{{"alice", "warpnet"}, {"bob", "testnet"}} {
 		u, ok := m.GetUser(tc.user)
@@ -166,7 +94,7 @@ func TestMultiNodeResolvesAUserOnWhicheverNetworkHasThem(t *testing.T) {
 		if u.ID != tc.user {
 			t.Fatalf("user = %+v, want %s", u, tc.user)
 		}
-		c, ok := m.locate(tc.user)
+		c, ok := m.Locate(tc.user)
 		if !ok || c.network != tc.network {
 			t.Fatalf("%s located on %v, want %s", tc.user, c, tc.network)
 		}
@@ -182,7 +110,7 @@ func TestMultiNodeResolvesAUserOnWhicheverNetworkHasThem(t *testing.T) {
 func TestMultiNodeConfinesUserScopedCallsToTheHomeNetwork(t *testing.T) {
 	main := newStubNet(t, "warpnet", "alice")
 	test := newStubNet(t, "testnet", "bob")
-	m := newMultiNode([]*nodeClient{main.client, test.client})
+	m := NewMultiNode([]*Node{main.client, test.client})
 
 	if _, err := m.RequestUser("bob", warp.RoutePostFollow, warp.NewFollowEvent{FollowingId: "bob"}); err != nil {
 		t.Fatalf("follow for bob: %v", err)
@@ -213,7 +141,7 @@ func TestMultiNodeConfinesUserScopedCallsToTheHomeNetwork(t *testing.T) {
 func TestMultiNodeRefusesAWriteForAnUnknownUser(t *testing.T) {
 	main := newStubNet(t, "warpnet", "alice")
 	test := newStubNet(t, "testnet", "bob")
-	m := newMultiNode([]*nodeClient{main.client, test.client})
+	m := NewMultiNode([]*Node{main.client, test.client})
 
 	for name, call := range map[string]func() error{
 		"requestUser": func() error {
@@ -247,7 +175,7 @@ func TestMultiNodeRefusesAWriteForAnUnknownUser(t *testing.T) {
 // before multi-network support.
 func TestMultiNodeWithOneNetworkSkipsLocation(t *testing.T) {
 	only := newStubNet(t, "warpnet") // knows no users at all
-	m := newMultiNode([]*nodeClient{only.client})
+	m := NewMultiNode([]*Node{only.client})
 
 	if _, err := m.RequestUser("ghost", warp.RoutePostFollow, warp.NewFollowEvent{}); err != nil {
 		t.Fatalf("single-network requestUser: %v", err)
@@ -264,7 +192,7 @@ func TestMultiNodeWithOneNetworkSkipsLocation(t *testing.T) {
 func TestMultiNodeRefusesARequestItCannotRoute(t *testing.T) {
 	main := newStubNet(t, "warpnet", "alice")
 	test := newStubNet(t, "testnet", "bob")
-	m := newMultiNode([]*nodeClient{main.client, test.client})
+	m := NewMultiNode([]*Node{main.client, test.client})
 
 	_, err := m.Request(warp.RouteGetTweet, warp.GetTweetEvent{TweetId: "t1"})
 	if !errors.Is(err, errNoRoutingUser) {
@@ -290,7 +218,7 @@ func TestMultiNodeRefusesARequestItCannotRoute(t *testing.T) {
 // request is still served — the pre-multi-network behaviour.
 func TestMultiNodeWithOneNetworkServesUnroutedRequests(t *testing.T) {
 	only := newStubNet(t, "warpnet")
-	m := newMultiNode([]*nodeClient{only.client})
+	m := NewMultiNode([]*Node{only.client})
 
 	if _, err := m.Request(warp.RouteGetTweet, warp.GetTweetEvent{TweetId: "t1"}); err != nil {
 		t.Fatalf("single-network read: %v", err)
@@ -307,9 +235,9 @@ func TestMultiNodeWithOneNetworkServesUnroutedRequests(t *testing.T) {
 func TestPublicSurfaceReadsStayOnTheOwnersNetwork(t *testing.T) {
 	main := newStubNet(t, "warpnet", "alice")
 	test := newStubNet(t, "testnet", "bob")
-	m := newMultiNode([]*nodeClient{main.client, test.client})
+	m := NewMultiNode([]*Node{main.client, test.client})
 
-	g := newRouterTestGateway(t, fediverse.Config{Requester: m, Source: m})
+	g := newTestGateway(t, fediverse.Config{Requester: m, Source: m})
 	srv := httptest.NewServer(g.Routes())
 	defer srv.Close()
 

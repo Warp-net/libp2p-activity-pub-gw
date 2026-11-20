@@ -7,225 +7,116 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse"
-	"github.com/Warp-net/activity-pub-gw/internal/fediverse/fediversetest"
-	"github.com/Warp-net/activity-pub-gw/internal/nostr"
-	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
-	"github.com/Warp-net/activity-pub-gw/internal/warp"
+	"github.com/Warp-net/bridge-gateway/internal/fediverse"
+	"github.com/Warp-net/bridge-gateway/internal/fediverse/fediversetest"
+	"github.com/Warp-net/bridge-gateway/internal/node"
+	"github.com/Warp-net/bridge-gateway/internal/nostr"
+	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
+	"github.com/Warp-net/bridge-gateway/internal/warp"
 	"github.com/Warp-net/warpnet/event"
-
 	wjson "github.com/Warp-net/warpnet/json"
-	"github.com/Warp-net/warpnet/security"
-	"github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/libp2p/go-libp2p"
-
-	p2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/libp2p/go-libp2p/core/network"
-	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-// newTestNode builds an in-process libp2p host with a warpnet-derived identity
-// (the peer id must come from the ed25519 key the envelope is signed with, or
-// the nodeserver's signature check rejects it) wrapped in a nodeClient.
-func newTestNode(t *testing.T, seed string) *nodeClient {
-	t.Helper()
-	priv, err := security.GenerateKeyFromSeed([]byte(seed))
-	if err != nil {
-		t.Fatalf("seed key: %v", err)
-	}
-	p2pPriv, err := p2pcrypto.UnmarshalEd25519PrivateKey(priv)
-	if err != nil {
-		t.Fatalf("unmarshal key: %v", err)
-	}
-	h, err := libp2p.New(
-		libp2p.Identity(p2pPriv),
-		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"),
-		libp2p.DisableRelay(),
-	)
-	if err != nil {
-		t.Fatalf("host: %v", err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-
-	c := &nodeClient{
-		h:          h,
-		priv:       priv,
-		network:    warp.DefaultNetwork,
-		relays:     map[peer.ID]struct{}{},
-		owner:      expirable.NewLRU[string, peer.ID](ownerCacheSize, nil, ownerCacheTTL),
-		bridgeKeys: expirable.NewLRU[peer.ID, []byte](ownerCacheSize, nil, bridgeKeyTTL),
-
-		throttled: expirable.NewLRU[string, struct{}](throttleCacheSize, nil, throttleCooldown),
-		users:     expirable.NewLRU[string, fediverse.WarpnetUser](userCacheSize, nil, userCacheTTL),
-	}
-	c.stream = c.streamToMember
-	return c
-}
-
-// nodeFixture is a gateway serving Warpnet's public routes over libp2p to a
-// second in-process node, with an in-process Fediverse instance behind it.
-type nodeFixture struct {
-	server *nodeClient
-	client *nodeClient
+// routesFixture is the gateway's route table on one node, with an in-process
+// Fediverse instance behind it.
+type routesFixture struct {
+	routes map[string]node.HandlerFunc
+	nodeID string
 	g      *fediverse.Gateway
 	peer   *fediversetest.Instance
 	handle string
 	actor  string
 }
 
-func newNodeFixture(t *testing.T) *nodeFixture {
+// testNode is the gateway's node as the routes see it.
+type testNode struct{ id string }
+
+func (n testNode) Request(string, any) ([]byte, error) { return nil, errors.New("no network") }
+func (n testNode) RequestUser(string, string, any) ([]byte, error) {
+	return nil, errors.New("no network")
+}
+func (n testNode) HomeUser(string) (warp.User, bool)  { return warp.User{}, false }
+func (n testNode) Followings(string) ([]string, bool) { return nil, false }
+func (n testNode) ID() string                         { return n.id }
+func (n testNode) NetworkName() string                { return warp.DefaultNetwork }
+
+func newRoutesFixture(t *testing.T) *routesFixture {
 	t.Helper()
 	f := fediversetest.NewInstance(t)
 	g := newRouterTestGateway(t, fediverse.Config{Client: f.Client()})
 	actorURL := f.Actor("bob", nil)
 	f.WebfingerFor("bob", actorURL)
 
-	server := newTestNode(t, "srv-"+t.Name())
-	client := newTestNode(t, "cli-"+t.Name())
-	// The Nostr bridge is on, as in production, so Mastodon and Threads routes
-	// are exercised next to it; a request it wrongly claimed would reach this
-	// dead relay and fail.
+	// The Nostr bridge is on, as in production, so a request it wrongly
+	// claimed would reach this dead relay and fail.
 	t.Setenv("GATEWAY_NOSTR_RELAYS", "ws://127.0.0.1:1")
-	server.serveRoutes(g, testHub(g, nostr.RelaysFromEnv()), warp.DefaultOwnerHandle)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := client.h.Connect(ctx, peer.AddrInfo{ID: server.h.ID(), Addrs: server.h.Addrs()}); err != nil {
-		t.Fatalf("connect: %v", err)
+	n := testNode{id: "12D3KooWGatewayNode"}
+	return &routesFixture{
+		routes: routes(g, testHub(g), n),
+		nodeID: n.id,
+		g:      g,
+		peer:   f,
+		handle: "bob@" + f.Host(),
+		actor:  actorURL,
 	}
-	client.remember(server.h.ID())
-
-	return &nodeFixture{server: server, client: client, g: g, peer: f, handle: "bob@" + f.Host(), actor: actorURL}
 }
 
-// call streams a route to the gateway node and decodes the reply into out.
-func (fx *nodeFixture) call(t *testing.T, route string, payload, out any) []byte {
+// request answers a route the way the node's stream handler does, with a
+// handler error turned into an error envelope.
+func (fx *routesFixture) request(t *testing.T, route string, payload any) []byte {
 	t.Helper()
-	bt, err := fx.client.Request(route, payload)
-	if err != nil {
-		t.Fatalf("%s: %v", route, err)
+	h, ok := fx.routes[route]
+	if !ok {
+		t.Fatalf("%s is not served", route)
 	}
-	if rerr := warp.NodeResponseError(bt); rerr != nil {
-		t.Fatalf("%s: node error: %v", route, rerr)
+	buf, err := wjson.Marshal(payload)
+	if err != nil {
+		t.Fatalf("%s: marshal: %v", route, err)
+	}
+	resp, err := h(context.Background(), buf)
+	if err != nil {
+		resp = event.ResponseError{Message: err.Error()}
+	}
+	bt, err := wjson.Marshal(resp)
+	if err != nil {
+		t.Fatalf("%s: marshal response: %v", route, err)
+	}
+	return bt
+}
+
+// call answers a route and decodes the reply into out.
+func (fx *routesFixture) call(t *testing.T, route string, payload, out any) []byte {
+	t.Helper()
+	bt := fx.request(t, route, payload)
+	if err := warp.NodeResponseError(bt); err != nil {
+		t.Fatalf("%s: node error: %v", route, err)
 	}
 	if out != nil {
-		if uerr := json.Unmarshal(bt, out); uerr != nil {
-			t.Fatalf("%s: decode %s: %v", route, bt, uerr)
+		if err := json.Unmarshal(bt, out); err != nil {
+			t.Fatalf("%s: decode %s: %v", route, bt, err)
 		}
 	}
 	return bt
 }
 
-// rawStream writes arbitrary bytes on a route and returns whatever comes back;
-// the nodeserver drops (writes nothing to) an envelope it refuses.
-func (fx *nodeFixture) rawStream(t *testing.T, route string, data []byte) []byte {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	ctx = network.WithAllowLimitedConn(ctx, route)
-	s, err := fx.client.h.NewStream(ctx, fx.server.h.ID(), protocol.ID(route))
-	if err != nil {
-		t.Fatalf("new stream: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-	if _, werr := s.Write(data); werr != nil {
-		t.Fatalf("write: %v", werr)
-	}
-	if cerr := s.CloseWrite(); cerr != nil {
-		t.Fatalf("close write: %v", cerr)
-	}
-	buf := make([]byte, 4096)
-	n, _ := s.Read(buf)
-	return buf[:n]
+// testHub is a Nostr hub over a test relay pool that publishes nothing.
+func testHub(g *fediverse.Gateway) *nostr.Hub {
+	pool := nostr.NewRelayPool(http.DefaultClient)
+	pool.AllowInsecure = true
+	return nostr.NewHub(pool, noBridgeKeys{}, g, g, g.Host, false)
 }
 
-func TestNodeServerInfo(t *testing.T) {
-	fx := newNodeFixture(t)
-	var info map[string]any
-	fx.call(t, event.PUBLIC_GET_INFO, nil, &info)
+type noBridgeKeys struct{}
 
-	if info["owner_id"] != warp.DefaultOwnerHandle {
-		t.Fatalf("owner = %v, want the Mastodon entry handle so discovery seeds it", info["owner_id"])
-	}
-	if info["node_id"] != fx.server.h.ID().String() {
-		t.Fatalf("node_id = %v", info["node_id"])
-	}
-	// The gateway is relay-only, so it reports itself like a NAT'd member node.
-	if info["type"] != "member" {
-		t.Fatalf("type = %v, want a member node", info["type"])
-	}
-	if info["reachability"] != float64(network.ReachabilityPrivate) {
-		t.Fatalf("reachability = %v, want private (relay-only)", info["reachability"])
-	}
-	if info["relay_state"] != "off" {
-		t.Fatalf("relay_state = %v", info["relay_state"])
-	}
-	if info["network"] != warp.DefaultNetwork {
-		t.Fatalf("network = %v", info["network"])
-	}
-}
+func (noBridgeKeys) BridgeKey(string, string) ([]byte, bool) { return nil, false }
 
-func TestNodeServerRejectsUnauthenticatedEnvelopes(t *testing.T) {
-	fx := newNodeFixture(t)
-
-	t.Run("a malformed envelope is dropped", func(t *testing.T) {
-		if got := fx.rawStream(t, warp.RouteGetUser, []byte("not an envelope")); len(got) != 0 {
-			t.Fatalf("response = %q, want the stream dropped", got)
-		}
-	})
-
-	// An unsigned envelope must not bypass verification, like the node's own
-	// auth middleware.
-	t.Run("an unsigned envelope is dropped", func(t *testing.T) {
-		body, err := wjson.Marshal(warp.GetUserEvent{UserId: "alice"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		env, err := wjson.Marshal(warp.Message{
-			Body: wjson.RawMessage(body), MessageId: "m1",
-			NodeId: fx.client.h.ID().String(), Destination: warp.RouteGetUser,
-			Timestamp: time.Now(), Version: "0.0.0",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := fx.rawStream(t, warp.RouteGetUser, env); len(got) != 0 {
-			t.Fatalf("response = %q, want the stream dropped", got)
-		}
-	})
-
-	t.Run("a forged signature is dropped", func(t *testing.T) {
-		body, err := wjson.Marshal(warp.GetUserEvent{UserId: "alice"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		other, err := security.GenerateKeyFromSeed([]byte("not-the-caller"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		msg := warp.Message{
-			Body: wjson.RawMessage(body), MessageId: "m2",
-			NodeId: fx.client.h.ID().String(), Destination: warp.RouteGetUser,
-			Timestamp: time.Now(), Version: "0.0.0",
-		}
-		msg.Signature = security.Sign(other, msg.SigningBytes())
-		env, merr := wjson.Marshal(msg)
-		if merr != nil {
-			t.Fatal(merr)
-		}
-		if got := fx.rawStream(t, warp.RouteGetUser, env); len(got) != 0 {
-			t.Fatalf("response = %q, want a signature from another key refused", got)
-		}
-	})
-}
-
-func TestNodeServerReadRoutes(t *testing.T) {
-	fx := newNodeFixture(t)
+func TestRoutesReadRoutes(t *testing.T) {
+	fx := newRoutesFixture(t)
 	f := fx.peer
 	noteURL := f.URL("/users/bob/statuses/1")
 
@@ -273,10 +164,7 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	// An unknown handle must come back as an empty listing, not an error that a
 	// search UI would surface.
 	t.Run("get users tolerates an unknown handle", func(t *testing.T) {
-		bt, err := fx.client.Request(warp.RouteGetUsers, warp.GetAllUsersEvent{UserId: "not-a-handle"})
-		if err != nil {
-			t.Fatal(err)
-		}
+		bt := fx.request(t, warp.RouteGetUsers, warp.GetAllUsersEvent{UserId: "not-a-handle"})
 		var resp warp.UsersResponse
 		if uerr := json.Unmarshal(bt, &resp); uerr != nil {
 			t.Fatalf("decode %s: %v", bt, uerr)
@@ -356,8 +244,8 @@ func TestNodeServerReadRoutes(t *testing.T) {
 	})
 }
 
-func TestNodeServerWriteRoutes(t *testing.T) {
-	fx := newNodeFixture(t)
+func TestRoutesWriteRoutes(t *testing.T) {
+	fx := newRoutesFixture(t)
 	f := fx.peer
 	noteURL := f.URL("/users/bob/statuses/1")
 	f.ServeDoc("/users/bob/statuses/1", fediverse.ContentTypeAP, map[string]any{
@@ -409,12 +297,9 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 	// A reaction whose emoji cannot be a database key is refused, like the node
 	// refuses it locally — not silently swallowed.
 	t.Run("a malformed emoji is an error", func(t *testing.T) {
-		bt, err := fx.client.Request(warp.RoutePostReact, warp.ReactionEvent{
+		bt := fx.request(t, warp.RoutePostReact, warp.ReactionEvent{
 			OwnerId: "alice", TweetId: noteURL, Emoji: "a/b",
 		})
-		if err != nil {
-			t.Fatalf("request: %v", err)
-		}
 		if rerr := warp.NodeResponseError(bt); rerr == nil {
 			t.Fatalf("response = %s, want an error envelope", bt)
 		}
@@ -583,90 +468,22 @@ func TestNodeServerWriteRoutes(t *testing.T) {
 
 // A handler failure must come back as warpnet's error envelope, not a dropped
 // stream — the caller has no other way to tell what went wrong.
-func TestNodeServerReturnsAnErrorEnvelope(t *testing.T) {
-	fx := newNodeFixture(t)
-	bt, err := fx.client.Request(warp.RouteGetTweet, warp.GetTweetEvent{TweetId: fx.peer.URL("/notes/ghost")})
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
+func TestRoutesReturnsAnErrorEnvelope(t *testing.T) {
+	fx := newRoutesFixture(t)
+	bt := fx.request(t, warp.RouteGetTweet, warp.GetTweetEvent{TweetId: fx.peer.URL("/notes/ghost")})
 	if rerr := warp.NodeResponseError(bt); rerr == nil {
 		t.Fatalf("response = %s, want an error envelope", bt)
 	}
 }
 
-func TestWrapJSON(t *testing.T) {
-	type payload struct {
-		Name string `json:"name"`
-	}
-	h := wrapJSON(func(_ context.Context, ev payload) (any, error) {
-		return "got:" + ev.Name, nil
-	})
-
-	got, err := h(context.Background(), []byte(`{"name":"alice"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "got:alice" {
-		t.Fatalf("got %v", got)
-	}
-
-	// An empty body must decode as the zero value (PUBLIC_POST_VIEW sends none).
-	got, err = h(context.Background(), nil)
-	if err != nil || got != "got:" {
-		t.Fatalf("empty body: (%v, %v)", got, err)
-	}
-
-	if _, err := h(context.Background(), []byte("{{{")); err == nil {
-		t.Fatal("a malformed body must be an error")
-	}
-}
-
-// A react answers the favourite tally attributed to the emoji the reactor named,
-// so the client can repaint its chips without a second round-trip. An unreact
-// names no emoji, so only the total travels.
-func TestReactionsCount(t *testing.T) {
-	got := reactionsCount(warp.DefaultReaction, 3)
-	if got.Count != 3 || got.Reactions[warp.DefaultReaction] != 3 {
-		t.Fatalf("react = %+v", got)
-	}
-	if got := reactionsCount("", 2); got.Count != 2 || got.Reactions != nil {
-		t.Fatalf("unreact = %+v, want the total only", got)
-	}
-	// A zero tally must not claim an emoji with no reactions behind it.
-	if got := reactionsCount(warp.DefaultReaction, 0); got.Reactions != nil {
-		t.Fatalf("zero = %+v, want no breakdown", got)
-	}
-}
-
-func TestRetweeterOfAndRetweetObject(t *testing.T) {
-	by := "alice"
-	if got := retweeterOf(warp.Tweet{UserId: "carol", RetweetedBy: &by}); got != "alice" {
-		t.Fatalf("retweeter = %q, want the booster", got)
-	}
-	empty := ""
-	if got := retweeterOf(warp.Tweet{UserId: "carol", RetweetedBy: &empty}); got != "carol" {
-		t.Fatalf("retweeter = %q, want the author when RetweetedBy is blank", got)
-	}
-	if got := retweeterOf(warp.Tweet{UserId: "carol"}); got != "carol" {
-		t.Fatalf("retweeter = %q", got)
-	}
-
-	if got := retweetObject(warp.Tweet{Id: "https://m/1", RootId: "https://m/0"}); got != "https://m/1" {
-		t.Fatalf("object = %q, want the tweet id", got)
-	}
-	if got := retweetObject(warp.Tweet{RootId: "https://m/0"}); got != "https://m/0" {
-		t.Fatalf("object = %q, want the root as fallback", got)
-	}
-}
-
-func TestNodeServerWhoToFollow(t *testing.T) {
-	fx := newNodeFixture(t)
+func TestRoutesWhoToFollow(t *testing.T) {
+	fx := newRoutesFixture(t)
 	t.Setenv("GATEWAY_DISCOVERY_HOST", fx.peer.Host())
 	fx.peer.ServeDoc("/api/v1/directory", "application/json", []any{map[string]any{"acct": "alice", "username": "Alice"}})
 	for _, route := range []string{event.PUBLIC_GET_WHOTOFOLLOW, warp.RouteGetUsers} {
 		var resp warp.UsersResponse
 		fx.call(t, route, warp.GetAllUsersEvent{UserId: warp.DefaultOwnerHandle}, &resp)
-		if len(resp.Users) != 1 || resp.Users[0].NodeId != fx.server.h.ID().String() {
+		if len(resp.Users) != 1 || resp.Users[0].NodeId != fx.nodeID {
 			t.Fatalf("%s response = %+v", route, resp)
 		}
 	}
@@ -694,14 +511,36 @@ func newRouterTestGateway(t *testing.T, cfg fediverse.Config) *fediverse.Gateway
 	return g
 }
 
-func TestNodeServerRemembersCallingMembers(t *testing.T) {
-	fx := newNodeFixture(t)
-	if got := fx.server.memberCandidates(warp.RouteGetUsers); len(got) != 0 {
-		t.Fatalf("candidates = %v before any call", got)
+func TestRoutesServeNostr(t *testing.T) {
+	relay := nostrtest.NewRelay(t)
+	alice := nostrtest.NewKey()
+	now := time.Now().Unix()
+	note := alice.Sign(t, nostr.KindNote, "from nostr", now-1)
+	relay.Add(alice.Sign(t, nostr.KindProfile, `{"name":"Alice"}`, now), note)
+
+	g := newRouterTestGateway(t, fediverse.Config{})
+	t.Setenv("GATEWAY_NOSTR_RELAYS", relay.URL())
+	n := testNode{id: "12D3KooWGatewayNode"}
+	fx := &routesFixture{routes: routes(g, testHub(g), n), nodeID: n.id, g: g}
+
+	var u warp.User
+	fx.call(t, warp.RouteGetUser, warp.GetUserEvent{UserId: nostr.Handle(alice.PK)}, &u)
+	if u.Id != nostr.Handle(alice.PK) || u.Network != warp.NostrNetwork || u.NodeId != fx.nodeID {
+		t.Fatalf("user = %+v", u)
 	}
-	fx.call(t, event.PUBLIC_GET_INFO, nil, nil)
-	got := fx.server.memberCandidates(warp.RouteGetUsers)
-	if len(got) != 1 || got[0] != fx.client.h.ID() {
-		t.Fatalf("candidates = %v; a node that called must be asked back", got)
+	var feed warp.TweetsResponse
+	fx.call(t, warp.RouteGetTweets, warp.GetAllTweetsEvent{UserId: nostr.Handle(alice.PK)}, &feed)
+	if len(feed.Tweets) != 1 || feed.Tweets[0].Id != note.ID.Hex() {
+		t.Fatalf("feed = %+v", feed.Tweets)
 	}
+	var one warp.Tweet
+	fx.call(t, warp.RouteGetTweet, warp.GetTweetEvent{TweetId: note.ID.Hex()}, &one)
+	if one.Text != "from nostr" {
+		t.Fatalf("tweet = %+v", one)
+	}
+
+	parent := note.ID.Hex()
+	fx.call(t, warp.RoutePostFollow, warp.NewFollowEvent{FollowerId: "01WARPUSER", FollowingId: nostr.Handle(alice.PK)}, nil)
+	fx.call(t, warp.RoutePostReply, warp.Tweet{Id: "01REPLY", UserId: "01WARPUSER", Text: "hi", ParentId: &parent, RootId: parent}, nil)
+	fx.call(t, warp.RoutePostReact, warp.ReactionEvent{TweetId: parent, UserId: nostr.Handle(alice.PK), OwnerId: "01WARPUSER"}, nil)
 }
