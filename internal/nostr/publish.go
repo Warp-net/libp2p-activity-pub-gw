@@ -41,9 +41,8 @@ import (
 // nostrPublisher writes a Warpnet user's actions on Nostr notes to Nostr,
 // signed with the user's derived key: replies, quotes, reactions, reposts,
 // their undos, deleted replies and the kind 3 follow list. Nothing is
-// published for a user who has not consented at sign-up, whose account is
-// locked, or who lives outside the main network; sponsored content never
-// leaves Warpnet.
+// published for a user who has not consented at sign-up or whose account is
+// locked; sponsored content never leaves Warpnet.
 
 const (
 	nostrConsentKey      = "nostr"
@@ -91,9 +90,6 @@ func newPublisher(keys *Keys, bridge *Bridge, home HomeReader, network string, l
 // consents reports whether userID's actions may be published to Nostr: on
 // unless the user opted out at sign-up.
 func (p *Publisher) consents(userID string) bool {
-	if p.network != warp.DefaultNetwork { // testnet stays off the public relays
-		return false
-	}
 	u, ok := p.actors.Get(userID)
 	if !ok {
 		if u, ok = p.home.HomeUser(userID); !ok {

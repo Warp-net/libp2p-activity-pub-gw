@@ -195,8 +195,8 @@ func TestNostrConsent(t *testing.T) {
 		t.Fatal("a locked account is never published")
 	}
 	testnet := newPublisher(fx.keys, fx.pub.bridge, fx.home, "testnet", testLinks{})
-	if testnet.consents(bobULID) {
-		t.Fatal("testnet stays off the public relays")
+	if !testnet.consents(bobULID) {
+		t.Fatal("testnet users are published like the main network's")
 	}
 }
 
