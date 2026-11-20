@@ -90,8 +90,7 @@ func TestNostrPostPollerPublishesPostsEditsAndDeletes(t *testing.T) {
 	fx := newPublishFixture(t)
 	alice := fx.pk(t, aliceULID)
 	site := "https://alice.example"
-	fx.home.users[aliceULID] = warp.User{Id: aliceULID, Username: "Alice", Bio: "hi", AvatarKey: "avatar-key", Website: &site,
-		Metadata: map[string]string{nostrConsentKey: nostrConsentAllow}}
+	fx.home.users[aliceULID] = warp.User{Id: aliceULID, Username: "Alice", Bio: "hi", AvatarKey: "avatar-key", Website: &site}
 	feed := &fakeFeed{}
 	now := time.Now()
 	existing := post("01EXISTING", "already there", now.Add(-time.Hour))
@@ -161,7 +160,7 @@ func TestNostrPostPollerPublishesPostsEditsAndDeletes(t *testing.T) {
 
 func TestNostrOutboundStartsConsentingUsersOnce(t *testing.T) {
 	fx := newPublishFixture(t)
-	feed := &fakeFeed{users: []warp.User{{Id: aliceULID}, {Id: carolULID}, {Id: "bob@mastodon.social", Network: warp.MastodonNetwork}}}
+	feed := &fakeFeed{users: []warp.User{{Id: aliceULID}, optedOut(carolULID), {Id: "bob@mastodon.social", Network: warp.MastodonNetwork}}}
 	o := NewOutbound(testCtx(t), feed, fx.pub)
 	o.scan(warp.DefaultOwnerHandle)
 	o.scan(warp.DefaultOwnerHandle)
