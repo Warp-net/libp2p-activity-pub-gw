@@ -73,11 +73,14 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const gatewayVersion = "0.1.120"
+const gatewayVersion = "0.1.121"
 
-// nostrPublish switches writing consenting users' content to Nostr; a
-// developer's switch, not deployment config.
-const nostrPublish = true
+// Developer's switches, not deployment config: nostrEnabled runs the Nostr
+// bridge, nostrPublish writes consenting users' content to Nostr.
+const (
+	nostrEnabled = true
+	nostrPublish = true
+)
 
 // logRingSize is how many recent log lines the /logs endpoint retains in memory.
 const logRingSize = 2000
@@ -157,7 +160,7 @@ func main() {
 	}
 
 	var hub *nostrHub
-	if os.Getenv("GATEWAY_DISABLE_NOSTR") == "" {
+	if nostrEnabled {
 		hub = &nostrHub{g: g, relays: nostr.NewRelayPool(netguard.NewClient(0))}
 		keys := nodeKeys{}
 		for _, c := range clients {
