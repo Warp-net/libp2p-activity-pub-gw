@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Warp-net/activity-pub-gw/internal/nostr/nostrtest"
 	"github.com/Warp-net/activity-pub-gw/internal/warp"
 )
 
@@ -53,7 +54,15 @@ func (f *fakeFeed) set(ts ...warp.Tweet) {
 }
 
 func (f *fakeFeed) Request(string, any) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return json.Marshal(warp.UsersResponse{Users: f.users})
+}
+
+func (f *fakeFeed) setUsers(us ...warp.User) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.users = us
 }
 
 func (f *fakeFeed) RequestUser(userID, _ string, _ any) ([]byte, error) {
@@ -161,6 +170,30 @@ func TestNostrOutboundStartsConsentingUsersOnce(t *testing.T) {
 	if len(o.started) != 1 || !o.started[aliceULID] {
 		t.Fatalf("started = %v, want only the consenting user", o.started)
 	}
+}
+
+// startedUser reports whether the outbound has a poller for a user.
+type startedUser struct {
+	o  *nostrOutbound
+	id string
+}
+
+func (s startedUser) ok() bool {
+	s.o.mu.Lock()
+	defer s.o.mu.Unlock()
+	return s.o.started[s.id]
+}
+
+func TestNostrOutboundRetriesAnUnreachableNetworkSoon(t *testing.T) {
+	fx := newPublishFixture(t)
+	feed := &fakeFeed{}
+	o := NewOutbound(testCtx(t), feed, fx.pub)
+	o.retry = 10 * time.Millisecond
+	go o.RunScanner(warp.DefaultOwnerHandle)
+
+	time.Sleep(30 * time.Millisecond)
+	feed.setUsers(warp.User{Id: aliceULID})
+	nostrtest.WaitFor(t, "a scan soon after the network answers", startedUser{o, aliceULID}.ok)
 }
 
 func TestNostrJSON(t *testing.T) {

@@ -123,6 +123,9 @@ func (c *nodeClient) rememberBridgeKey(from peer.ID, hexKey string) {
 	if err != nil || len(key) != bridgeKeySize {
 		return
 	}
+	if _, seen := c.bridgeKeys.Peek(from); !seen {
+		warp.NetLog(c.network).Infof("nodeserver: bridge key from %s", from)
+	}
 	c.bridgeKeys.Add(from, key)
 }
 
