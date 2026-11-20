@@ -279,6 +279,9 @@ func (c *nodeClient) streamHandler(route string, h routeHandler) network.StreamH
 				warp.NetLog(c.network).Warnf("nodeserver: %s: signature from %s invalid: %v", route, conn.RemotePeer(), verr)
 				return
 			}
+			// A node that writes to the gateway is a member it can ask back,
+			// even when the DHT has not surfaced it yet.
+			c.remember(conn.RemotePeer())
 			var be warp.BridgeEnvelope
 			if wjson.Unmarshal(data, &be) == nil {
 				c.rememberBridgeKey(conn.RemotePeer(), be.BridgeKey)
