@@ -30,6 +30,7 @@ package nostr
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -90,6 +91,7 @@ const (
 	relayMaxPerFetch  = 500
 	relayRetryBackoff = 30 * time.Second
 	relayIdleTTL      = 10 * time.Minute
+	relayNoCountTTL   = time.Hour
 )
 
 type RelayPool struct {
@@ -102,15 +104,19 @@ type RelayPool struct {
 	used   map[string]time.Time
 	active map[string]int
 	down   *expirable.LRU[string, struct{}]
+	// noCount holds the relays that did not answer a COUNT; most never speak
+	// NIP-45 and would otherwise hold every count to its whole budget.
+	noCount *expirable.LRU[string, struct{}]
 }
 
 func NewRelayPool(client *http.Client) *RelayPool {
 	return &RelayPool{
-		client: client,
-		conns:  map[string]*nostr.Relay{},
-		used:   map[string]time.Time{},
-		active: map[string]int{},
-		down:   expirable.NewLRU[string, struct{}](1024, nil, relayDownTTL),
+		client:  client,
+		conns:   map[string]*nostr.Relay{},
+		used:    map[string]time.Time{},
+		active:  map[string]int{},
+		down:    expirable.NewLRU[string, struct{}](1024, nil, relayDownTTL),
+		noCount: expirable.NewLRU[string, struct{}](1024, nil, relayNoCountTTL),
 	}
 }
 
@@ -306,21 +312,24 @@ func (p *RelayPool) count(ctx context.Context, urls []string, f nostrFilter) (in
 	res := &countResult{}
 	cctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
 	defer cancel()
-	answered := make(chan struct{}, len(urls))
 	var wg sync.WaitGroup
 	for _, u := range urls {
+		if p.noCount.Contains(u) {
+			continue
+		}
 		wg.Add(1)
-		go p.countAt(cctx, &wg, u, filter, res, answered)
+		go p.countAt(cctx, &wg, u, filter, res)
 	}
-	awaitRelays(cctx, cancel, &wg, answered, 1)
+	wg.Wait()
 	res.mu.Lock()
 	defer res.mu.Unlock()
 	return res.best, res.answered
 }
 
-// countAt asks one relay; counts take the largest answer, but only relayGrace
-// past the first: few relays speak NIP-45, and the rest hold the whole budget.
-func (p *RelayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, res *countResult, answered chan<- struct{}) {
+// countAt asks one relay; counts take the largest answer, so every relay that
+// counts is waited for within the budget, and one that does not is skipped
+// for relayNoCountTTL.
+func (p *RelayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, res *countResult) {
 	defer wg.Done()
 	r, url, ok := p.relay(ctx, raw)
 	if !ok {
@@ -329,13 +338,15 @@ func (p *RelayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string,
 	defer p.release(url)
 	n, _, err := r.Count(ctx, filter, nostr.SubscriptionOptions{})
 	if err != nil {
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			p.noCount.Add(raw, struct{}{})
+		}
 		return
 	}
 	res.mu.Lock()
 	res.answered = true
 	res.best = max(res.best, int64(n))
 	res.mu.Unlock()
-	answered <- struct{}{}
 }
 
 // liveDelivery hands each live event to on once, whichever relays carry it.
