@@ -107,6 +107,7 @@ type Bridge struct {
 	pub     *Publisher
 
 	profiles   *expirable.LRU[string, nostrEvent]
+	counts     *expirable.LRU[string, nostrCounts]
 	relayLists *expirable.LRU[string, []string]
 	follows    *expirable.LRU[string, []string]
 	authors    *expirable.LRU[string, string] // event id -> author pubkey
@@ -118,6 +119,7 @@ func newBridge(relays Relays, defaults []string, nodeID, selfHost string) *Bridg
 	return &Bridge{
 		relays: relays, defaults: defaults, nodeID: nodeID, selfHost: selfHost, entry: nostrEntryPubKey,
 		profiles:   expirable.NewLRU[string, nostrEvent](nostrCacheSize, nil, nostrProfileTTL),
+		counts:     expirable.NewLRU[string, nostrCounts](nostrCacheSize, nil, nostrProfileTTL),
 		relayLists: expirable.NewLRU[string, []string](nostrCacheSize, nil, nostrRelayListTTL),
 		follows:    expirable.NewLRU[string, []string](nostrCacheSize, nil, nostrProfileTTL),
 		authors:    expirable.NewLRU[string, string](nostrCacheSize, nil, nostrRelayListTTL),
@@ -155,13 +157,12 @@ func (b *Bridge) profile(ctx context.Context, pk string) (nostrEvent, bool) {
 	if p, ok := b.profiles.Get(pk); ok {
 		return p, p.ID != ""
 	}
-	var p nostrEvent
 	evs := b.relays.fetch(ctx, b.authorRelays(ctx, pk), nostrFilter{Kinds: []int{KindProfile}, Authors: []string{pk}, Limit: 1})
-	if len(evs) > 0 && evs[0].PubKey == pk {
-		p = evs[0]
+	if len(evs) == 0 || evs[0].PubKey != pk {
+		return nostrEvent{}, false // a miss is not cached: relays fail transiently
 	}
-	b.profiles.Add(pk, p)
-	return p, p.ID != ""
+	b.profiles.Add(pk, evs[0])
+	return evs[0], true
 }
 
 // names fills the display names of the authors of ts from their profiles,
@@ -202,8 +203,8 @@ func (b *Bridge) prefetchProfiles(ctx context.Context, pks []string) {
 			got[ev.PubKey] = ev
 		}
 	}
-	for _, pk := range missing {
-		b.profiles.Add(pk, got[pk])
+	for pk, ev := range got {
+		b.profiles.Add(pk, ev)
 	}
 }
 
@@ -259,15 +260,24 @@ func (b *Bridge) getUser(ctx context.Context, handle string, withCounts bool) (w
 	if !withCounts {
 		return u, nil
 	}
-	relays := b.authorRelays(ctx, pk)
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go b.followingsInto(ctx, &wg, pk, &u.FollowingsCount)
-	go b.countInto(ctx, &wg, relays, nostrFilter{Kinds: []int{kindFollowList}, Tags: map[string][]string{"p": {pk}}}, &u.FollowersCount)
-	go b.countInto(ctx, &wg, relays, nostrFilter{Kinds: []int{KindNote}, Authors: []string{pk}}, &u.TweetsCount)
-	wg.Wait()
+	c, ok := b.counts.Get(pk)
+	if !ok {
+		relays := b.authorRelays(ctx, pk)
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go b.followingsInto(ctx, &wg, pk, &c.followings)
+		go b.countInto(ctx, &wg, relays, nostrFilter{Kinds: []int{kindFollowList}, Tags: map[string][]string{"p": {pk}}}, &c.followers)
+		go b.countInto(ctx, &wg, relays, nostrFilter{Kinds: []int{KindNote}, Authors: []string{pk}}, &c.tweets)
+		wg.Wait()
+		b.counts.Add(pk, c)
+	}
+	u.FollowingsCount, u.FollowersCount, u.TweetsCount = c.followings, c.followers, c.tweets
 	return u, nil
 }
+
+// nostrCounts are a profile's approximate numbers, cached as long as the
+// profile: every open of a profile would otherwise wait on the relays again.
+type nostrCounts struct{ followings, followers, tweets int64 }
 
 func (b *Bridge) followingsInto(ctx context.Context, wg *sync.WaitGroup, pk string, out *int64) {
 	defer wg.Done()

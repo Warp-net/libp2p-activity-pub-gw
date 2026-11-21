@@ -379,3 +379,35 @@ func TestNostrWhoToFollowEntersTheFollowGraph(t *testing.T) {
 		t.Fatalf("suggestions = %v, want the entry and the accounts it follows with a profile", got)
 	}
 }
+
+func TestNostrProfileMissIsRetried(t *testing.T) {
+	relay := nostrtest.NewRelay(t)
+	late := nostrtest.NewKey()
+	b := testNostrBridge(t, relay)
+	b.prefetchProfiles(testCtx(t), []string{late.PK})
+	if _, err := b.GetUser(testCtx(t), Handle(late.PK)); err == nil {
+		t.Fatal("an npub without a profile must not resolve")
+	}
+	relay.Add(late.Sign(t, KindProfile, `{"name":"late"}`, time.Now().Unix()))
+	if u, err := b.GetUser(testCtx(t), Handle(late.PK)); err != nil || u.Username != "late" {
+		t.Fatalf("a profile missed once must be read again, got %+v, %v", u, err)
+	}
+}
+
+func TestNostrCountDoesNotWaitForAStalledRelay(t *testing.T) {
+	fast, stalled := nostrtest.NewRelay(t), nostrtest.NewRelay(t)
+	fast.Counting = true
+	stalled.Stalled = true
+	alice := nostrtest.NewKey()
+	fast.Add(alice.Sign(t, KindNote, "hi", time.Now().Unix()))
+	pool := testRelayPool()
+
+	start := time.Now()
+	n, ok := pool.count(testCtx(t), []string{fast.URL(), stalled.URL()}, nostrFilter{Kinds: []int{KindNote}, Authors: []string{alice.PK}})
+	if !ok || n != 1 {
+		t.Fatalf("count = %d, %v", n, ok)
+	}
+	if took := time.Since(start); took > 3*relayGrace {
+		t.Fatalf("took %s, want the stalled relay cut off after the grace period", took)
+	}
+}
