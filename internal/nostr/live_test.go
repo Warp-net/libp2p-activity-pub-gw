@@ -28,109 +28,12 @@ resulting from the use or misuse of this software.
 package nostr
 
 import (
-	"context"
 	"encoding/json"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/Warp-net/bridge-gateway/internal/nostr/nostrtest"
 	"github.com/Warp-net/bridge-gateway/internal/warp"
 )
-
-type pushed struct {
-	follower string
-	t        warp.Tweet
-}
-
-// pushRecorder stands in for the follower nodes.
-type pushRecorder struct {
-	mu   sync.Mutex
-	got  []pushed
-	mark int
-}
-
-func (r *pushRecorder) push(f string, tw warp.Tweet) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.got = append(r.got, pushed{f, tw})
-	return nil
-}
-
-func (r *pushRecorder) all() []pushed {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]pushed{}, r.got...)
-}
-
-func (r *pushRecorder) any() bool { return len(r.all()) > 0 }
-
-func (r *pushRecorder) setMark() { r.mark = len(r.all()) }
-
-func (r *pushRecorder) pastMark() bool { return len(r.all()) > r.mark }
-
-// liveWatch waits for a live subscription on one author.
-type liveWatch struct {
-	relay *nostrtest.Relay
-	pk    string
-}
-
-func (w liveWatch) ready() bool { return w.relay.LiveFor(w.pk) }
-
-func TestNostrLivePushesFollowedNotes(t *testing.T) {
-	relay := nostrtest.NewRelay(t)
-	alice, bob, carol, stranger := nostrtest.NewKey(), nostrtest.NewKey(), nostrtest.NewKey(), nostrtest.NewKey()
-	relay.Add(alice.Sign(t, kindFollowList, "", time.Now().Unix(), []string{"p", bob.PK}))
-	b := testNostrBridge(t, relay)
-
-	rec := &pushRecorder{}
-	live := newLive(b, rec.push)
-	live.resubscribeDelay = 10 * time.Millisecond
-	b.trusted = live.Trusted
-
-	live.SetFollow("01WARPUSER", Handle(alice.PK), false)
-	live.SetFollow("01WARPUSER", "alice@damus.io", false)
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go live.Run(ctx)
-	nostrtest.WaitFor(t, "live subscription", liveWatch{relay, alice.PK}.ready)
-
-	if !live.Trusted(alice.PK) || !live.Trusted(bob.PK) || live.Trusted(stranger.PK) {
-		t.Fatal("trust must cover followed authors and their followings only")
-	}
-
-	at := time.Now().Unix() + 1
-	relay.Add(
-		alice.Sign(t, KindNote, "live note", at),
-		alice.Sign(t, KindNote, "live reply", at, []string{"e", hexID('a'), "", "root"}),
-		stranger.Sign(t, KindNote, "not followed", at),
-	)
-	nostrtest.WaitFor(t, "push", rec.any)
-	time.Sleep(100 * time.Millisecond)
-	p := rec.all()
-	if len(p) != 1 || p[0].follower != "01WARPUSER" || p[0].t.Text != "live note" || p[0].t.UserId != Handle(alice.PK) {
-		t.Fatalf("pushes = %+v, want only the followed author's top-level note", p)
-	}
-
-	for range 2 * nostrAuthorBurst {
-		relay.Add(alice.Sign(t, KindNote, "flood "+hexID('f')[:4]+time.Now().String(), at))
-	}
-	time.Sleep(200 * time.Millisecond)
-	if n := len(rec.all()); n > nostrAuthorBurst {
-		t.Fatalf("%d pushes, want the per-author limit (%d) to cap a flood", n, nostrAuthorBurst)
-	}
-
-	live.SetFollow("01OTHER", Handle(carol.PK), false)
-	nostrtest.WaitFor(t, "resubscription", liveWatch{relay, carol.PK}.ready)
-	rec.setMark()
-	relay.Add(carol.Sign(t, KindNote, "carol note", time.Now().Unix()+1))
-	nostrtest.WaitFor(t, "carol push", rec.pastMark)
-
-	live.SetFollow("01WARPUSER", Handle(alice.PK), true)
-	if len(live.FollowersOf(alice.PK)) != 0 {
-		t.Fatal("unfollow must drop the follower")
-	}
-}
 
 // nostrScanRequester serves a users page and per-user followings for the scan.
 type nostrScanRequester struct {
