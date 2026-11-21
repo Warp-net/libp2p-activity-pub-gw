@@ -306,20 +306,21 @@ func (p *RelayPool) count(ctx context.Context, urls []string, f nostrFilter) (in
 	res := &countResult{}
 	cctx, cancel := context.WithTimeout(ctx, relayEOSETimeout)
 	defer cancel()
+	answered := make(chan struct{}, len(urls))
 	var wg sync.WaitGroup
 	for _, u := range urls {
 		wg.Add(1)
-		go p.countAt(cctx, &wg, u, filter, res)
+		go p.countAt(cctx, &wg, u, filter, res, answered)
 	}
-	wg.Wait()
+	awaitRelays(cctx, cancel, &wg, answered, 1)
 	res.mu.Lock()
 	defer res.mu.Unlock()
 	return res.best, res.answered
 }
 
-// countAt asks one relay; counts take the largest answer, so every relay is
-// waited for within the budget.
-func (p *RelayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, res *countResult) {
+// countAt asks one relay; counts take the largest answer, but only relayGrace
+// past the first: few relays speak NIP-45, and the rest hold the whole budget.
+func (p *RelayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string, filter nostr.Filter, res *countResult, answered chan<- struct{}) {
 	defer wg.Done()
 	r, url, ok := p.relay(ctx, raw)
 	if !ok {
@@ -334,6 +335,7 @@ func (p *RelayPool) countAt(ctx context.Context, wg *sync.WaitGroup, raw string,
 	res.answered = true
 	res.best = max(res.best, int64(n))
 	res.mu.Unlock()
+	answered <- struct{}{}
 }
 
 // liveDelivery hands each live event to on once, whichever relays carry it.
