@@ -28,6 +28,7 @@ resulting from the use or misuse of this software.
 package nostr
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -394,20 +395,26 @@ func TestNostrProfileMissIsRetried(t *testing.T) {
 	}
 }
 
-func TestNostrCountDoesNotWaitForAStalledRelay(t *testing.T) {
+func TestNostrCountSkipsARelayThatDoesNotCount(t *testing.T) {
 	fast, stalled := nostrtest.NewRelay(t), nostrtest.NewRelay(t)
 	fast.Counting = true
 	stalled.Stalled = true
 	alice := nostrtest.NewKey()
 	fast.Add(alice.Sign(t, KindNote, "hi", time.Now().Unix()))
 	pool := testRelayPool()
+	urls := []string{fast.URL(), stalled.URL()}
+	f := nostrFilter{Kinds: []int{KindNote}, Authors: []string{alice.PK}}
 
-	start := time.Now()
-	n, ok := pool.count(testCtx(t), []string{fast.URL(), stalled.URL()}, nostrFilter{Kinds: []int{KindNote}, Authors: []string{alice.PK}})
-	if !ok || n != 1 {
-		t.Fatalf("count = %d, %v", n, ok)
+	short, cancel := context.WithTimeout(testCtx(t), relayGrace)
+	defer cancel()
+	if n, ok := pool.count(short, urls, f); !ok || n != 1 {
+		t.Fatalf("first count = %d, %v", n, ok)
 	}
-	if took := time.Since(start); took > 3*relayGrace {
-		t.Fatalf("took %s, want the stalled relay cut off after the grace period", took)
+	start := time.Now()
+	if n, ok := pool.count(testCtx(t), urls, f); !ok || n != 1 {
+		t.Fatalf("second count = %d, %v", n, ok)
+	}
+	if took := time.Since(start); took > relayGrace {
+		t.Fatalf("took %s, want the relay that never counted skipped", took)
 	}
 }
