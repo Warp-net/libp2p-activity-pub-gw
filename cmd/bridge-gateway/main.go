@@ -55,7 +55,7 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const version = "0.1.131"
+const version = "0.1.132"
 
 // Developer's switches, not deployment config.
 const (

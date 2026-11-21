@@ -76,7 +76,7 @@ value is its peer id.
 
 ### 4. Point Warpnet at it
 
-Each Warpnet user who wants your gateway opens **Settings → Fediverse gateway**
+Each Warpnet user who wants your gateway opens **Settings → Bridge gateway**
 in their node, enters the peer id as **Gateway node id**, saves and restarts
 the node. From then on their node bridges Mastodon, Threads and Nostr through
 your gateway and hands it the key that signs their Nostr posts.
