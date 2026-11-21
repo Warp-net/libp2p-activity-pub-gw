@@ -1,7 +1,8 @@
 # Deploying the bridge-gateway
 
-A step-by-step runbook for putting one Warpnet user on the Fediverse, fronted by
-**Tailscale Funnel** (public HTTPS with no domain and no certificate management).
+A step-by-step runbook for putting Warpnet users on the Fediverse and Nostr,
+fronted by **Tailscale Funnel** (public HTTPS with no domain and no certificate
+management).
 
 Deployment is three parts: **A)** one-time Tailscale setup in the browser,
 **B)** gathering the Warpnet values, **C)** building and running the container —
@@ -87,12 +88,13 @@ network. If every network ends up disabled or unreachable, the gateway serves
 the static profile only.
 
 > [!IMPORTANT]
-> **Run only one gateway per network.** The libp2p identity comes from a fixed
-> seed (warpnet pins the peer id), so a second gateway joining a network the
-> first one is already on fights it for that identity, and requests reach
-> whichever wins. Since one process covers every network, one deployment is the
-> whole deployment — use `GATEWAY_DISABLE_<NETWORK>` to narrow it rather than
-> running a second gateway alongside.
+> **Never run two gateways from the same `/data`.** The libp2p peer id is
+> derived from the RSA key in `/data`, so two processes sharing that state fight
+> over one identity, and requests reach whichever wins. Since one process covers
+> every network, one deployment per state is the whole deployment — use
+> `GATEWAY_DISABLE_<NETWORK>` to narrow it rather than running a copy alongside.
+> A gateway with its own `/data` is a different gateway with its own peer id and
+> conflicts with nobody.
 
 ---
 
@@ -108,19 +110,22 @@ docker build -f Dockerfile.bridge-gateway -t bridge-gateway .
 **C2. Run it:**
 
 ```sh
-docker run -d --name warpnet-gw -v warpnet-gw-data:/data \
-  -e TS_AUTHKEY=tskey-auth-xxxxxxxx \      # from A4
+# TS_AUTHKEY is the key from A4
+docker run -d --name warpnet-gw --network host -v warpnet-gw-data:/data \
+  -e TS_AUTHKEY=tskey-auth-xxxxxxxx \
   bridge-gateway
 ```
 
 The gateway joins Warpnet through the network's bootstrap nodes on its own — no
 `NODE_NETWORK` needed (add it only per the table in B).
 
-- The gateway self-hosts via Funnel — you do **not** publish any ports; inbound
-  traffic arrives through Tailscale, so the container needs only outbound
-  internet.
-- The `/data` volume holds the RSA key, the follower fallback, and the Tailscale
-  node identity, so the `*.ts.net` hostname stays stable across restarts.
+- The gateway self-hosts via Funnel — you do **not** publish any HTTP ports;
+  Fediverse traffic arrives through Tailscale. `--network host` keeps its
+  Warpnet listeners (TCP 4040 for `warpnet`, 4041 for `testnet`) reachable from
+  other nodes, as in the official deployment.
+- The `/data` volume holds the RSA key and the Tailscale node identity, so the
+  `*.ts.net` hostname and the peer id stay stable across restarts. Nothing else
+  is written to disk.
 - The gateway's libp2p peer id is derived from that RSA key and logged at start
   (`nodeserver: serving … as <peer>`). Users of a self-hosted gateway set it as
   their gateway in the node settings; losing the key changes it.
@@ -139,7 +144,7 @@ Look for:
 
 ```
 bridge-gateway: tailscale funnel node up as warpnet-gw.tailXXXX.ts.net
-bridge-gateway: joined Warpnet; any user is resolvable via the network
+bridge-gateway: joined Warpnet (warpnet); any user is resolvable via the network
 bridge-gateway: serving public https://warpnet-gw.tailXXXX.ts.net via Tailscale Funnel
 ```
 
@@ -178,4 +183,4 @@ and serves any user.
 ## Without Docker
 
 The same binary runs directly with the same environment variables —
-see the "Phase 1 — run the gateway" section of [README.md](README.md).
+see "Run your own gateway" in [README.md](README.md).
